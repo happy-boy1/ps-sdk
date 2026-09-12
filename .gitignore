@@ -21,3 +21,10 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+
+### Go / 本地工具缓存 ###
+.gocache/
+.tmp/
+.pylibs/
+.pylibs2/
+*.exe
