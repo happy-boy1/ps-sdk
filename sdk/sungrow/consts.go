@@ -1,5 +1,7 @@
 package sungrow
 
+import "time"
+
 const (
 	PlatformName   = "Sungrow"
 	BaseURLChina   = "https://gateway.isolarcloud.com"
@@ -13,6 +15,13 @@ const (
 	QueryAppID       = "appkey"
 	QUeryToken       = "token"
 	QueryLanguage    = "lang"
+)
+
+const (
+	MaxAttempts       = 3
+	RetryBaseDelay    = 2 * time.Second
+	TokenRefreshAhead = 5 * time.Second
+	TokenTTL          = 24 * time.Hour
 )
 
 const (
@@ -73,43 +82,43 @@ const (
 type ResultCode string
 
 const (
-	ResultCodeSuccess                                                   = "1"
-	ResultCodeError                                                     = "-1"
-	ResultCodeErUnknownException                                        = "000"
-	ResultCodeErMissingParameterAppkey                                  = "001"
-	ResultCodeErMissingParameterToken                                   = "002"
-	ResultCodeErMissingParameterSysCode                                 = "003"
-	ResultCodeErInvalidAppkey                                           = "E00000"
-	ResultCodeErApiServiceHasExpired                                    = "E00001"
-	ResultCodeErParameterDecryptError                                   = "E00002"
-	ResultCodeErTokenLoginInvalid                                       = "E00003"
-	ResultCodeErMonthCallApiTimesUpperLimit                             = "E998"
-	ResultCodeErHourCallApiTimesUpperLimit                              = "E999"
-	ResultCodeErMissingParameter                                        = "009"
-	ResultCodeErParameterValueInvalid                                   = "010"
-	ResultCodeErSqlException                                            = "011"
-	ResultCodeUnauthorizedAccess                                        = "E900"
-	ResultCodeCallTooFrequently                                         = "E901"
-	ResultCodeAbnormalNetworkEnvironment                                = "E903"
-	ResultCodeRequestIsNotEncrypted                                     = "E902"
-	ResultCodeMissingParameterInRequestHeaderXRandomSecretKey           = "E904"
-	ResultCodeAesDecryptionException                                    = "E905"
-	ResultCodeRsaDecryptionException                                    = "E906"
-	ResultCodeAesRandomSecretKeyLengthMustBe16                          = "E907"
-	ResultCodeMissingKeyParameterApiKeyParam                            = "E908"
-	ResultCodeInvalidParameterFormatNonce32BitStringOfNumbersAndLetters = "E909"
-	ResultCodeRepeatedRequest                                           = "E910"
-	ResultCodeMissingParameterInRequestHeaderXAccessKey                 = "E911"
-	ResultCodeIllegalXAccessKey                                         = "E912"
-	ResultCodeExpiredRequest                                            = "E913"
-	ResultCodeMismatchedAppkeyAndXAccessKey                             = "E914"
-	ResultCodeLoginTooFrequently                                        = "E916"
-	ResultCodePermitDeniedByWhiteIpAddress                              = "E918"
-	ResultCodePermitDeniedByWhiteListUser                               = "E919"
-	ResultCodeSystemNotFound                                            = "E994"
-	ResultCodeRequestBodyTooLarge                                       = "E995"
-	ResultCodeApiNotFound                                               = "E996"
-	ResultCodeTransformBusinessResponseDataOccurError                   = "E997"
+	ResultCodeSuccess                                                   ResultCode = "1"
+	ResultCodeError                                                     ResultCode = "-1"
+	ResultCodeErUnknownException                                        ResultCode = "000"
+	ResultCodeErMissingParameterAppkey                                  ResultCode = "001"
+	ResultCodeErMissingParameterToken                                   ResultCode = "002"
+	ResultCodeErMissingParameterSysCode                                 ResultCode = "003"
+	ResultCodeErInvalidAppkey                                           ResultCode = "E00000"
+	ResultCodeErApiServiceHasExpired                                    ResultCode = "E00001"
+	ResultCodeErParameterDecryptError                                   ResultCode = "E00002"
+	ResultCodeErTokenLoginInvalid                                       ResultCode = "E00003"
+	ResultCodeErMonthCallApiTimesUpperLimit                             ResultCode = "E998"
+	ResultCodeErHourCallApiTimesUpperLimit                              ResultCode = "E999"
+	ResultCodeErMissingParameter                                        ResultCode = "009"
+	ResultCodeErParameterValueInvalid                                   ResultCode = "010"
+	ResultCodeErSqlException                                            ResultCode = "011"
+	ResultCodeUnauthorizedAccess                                        ResultCode = "E900"
+	ResultCodeCallTooFrequently                                         ResultCode = "E901"
+	ResultCodeAbnormalNetworkEnvironment                                ResultCode = "E903"
+	ResultCodeRequestIsNotEncrypted                                     ResultCode = "E902"
+	ResultCodeMissingParameterInRequestHeaderXRandomSecretKey           ResultCode = "E904"
+	ResultCodeAesDecryptionException                                    ResultCode = "E905"
+	ResultCodeRsaDecryptionException                                    ResultCode = "E906"
+	ResultCodeAesRandomSecretKeyLengthMustBe16                          ResultCode = "E907"
+	ResultCodeMissingKeyParameterApiKeyParam                            ResultCode = "E908"
+	ResultCodeInvalidParameterFormatNonce32BitStringOfNumbersAndLetters ResultCode = "E909"
+	ResultCodeRepeatedRequest                                           ResultCode = "E910"
+	ResultCodeMissingParameterInRequestHeaderXAccessKey                 ResultCode = "E911"
+	ResultCodeIllegalXAccessKey                                         ResultCode = "E912"
+	ResultCodeExpiredRequest                                            ResultCode = "E913"
+	ResultCodeMismatchedAppkeyAndXAccessKey                             ResultCode = "E914"
+	ResultCodeLoginTooFrequently                                        ResultCode = "E916"
+	ResultCodePermitDeniedByWhiteIpAddress                              ResultCode = "E918"
+	ResultCodePermitDeniedByWhiteListUser                               ResultCode = "E919"
+	ResultCodeSystemNotFound                                            ResultCode = "E994"
+	ResultCodeRequestBodyTooLarge                                       ResultCode = "E995"
+	ResultCodeApiNotFound                                               ResultCode = "E996"
+	ResultCodeTransformBusinessResponseDataOccurError                   ResultCode = "E997"
 )
 
 var resultCodeHints = map[ResultCode]string{
@@ -157,4 +166,115 @@ func (c ResultCode) Hint() string {
 		return h
 	}
 	return "详细见 Sungrow OpenApi 文档错误码说明"
+}
+
+func (c ResultCode) Retryable() bool {
+	switch c {
+	case ResultCodeRequestIsNotEncrypted, ResultCodeTransformBusinessResponseDataOccurError, ResultCodeSystemNotFound:
+		return true
+	default:
+		return false
+	}
+}
+
+// 设备类型
+type DevTypeID int
+
+const (
+	DevTypeInverter                  DevTypeID = 1  // 逆变器
+	DevTypeContainer                 DevTypeID = 2  // 集装箱
+	DevTypeGridConnectionPoint       DevTypeID = 3  // 并网点
+	DevTypeCombinerBox               DevTypeID = 4  // 汇流箱
+	DevTypeMeteoStation              DevTypeID = 5  // 环境监测仪
+	DevTypeTransformer               DevTypeID = 6  // 变压器
+	DevTypeMeter                     DevTypeID = 7  // 电表
+	DevTypeUPS                       DevTypeID = 8  // UPS
+	DevTypeDataLogger                DevTypeID = 9  // 数据采集器
+	DevTypeString                    DevTypeID = 10 // 组串
+	DevTypePlant                     DevTypeID = 11 // 电站
+	DevTypeCircuitProtection         DevTypeID = 12 // 线路保护
+	DevTypeSplittingDevice           DevTypeID = 13 // 解列装置
+	DevTypeEnergyStorageSystem       DevTypeID = 14 // 储能逆变器
+	DevTypeSamplingDevice            DevTypeID = 15 // 采集设备
+	DevTypeEMU                       DevTypeID = 16 // EMU
+	DevTypeUnit                      DevTypeID = 17 // 单元
+	DevTypeTempHumiditySensor        DevTypeID = 18 // 温湿度传感器
+	DevTypeIntelligentPowerCabinet   DevTypeID = 19 // 智能配电柜
+	DevTypeDisplayDevice             DevTypeID = 20 // 显示设备
+	DevTypeACPowerDistributedCabinet DevTypeID = 21 // 交流配电柜
+	DevTypeCommunicationModule       DevTypeID = 22 // 通信模块
+	DevTypeSystemBMS                 DevTypeID = 23 // 系统BMS
+	DevTypeArrayBMS                  DevTypeID = 24 // 阵列BMS
+	DevTypeDCDC                      DevTypeID = 25 // 直流-直流
+	DevTypeEnergyManagementSystem    DevTypeID = 26 // 能量管理系统
+	DevTypeTrackingSystem            DevTypeID = 27 // 跟踪系统
+	DevTypeWindEnergyConverter       DevTypeID = 28 // 风能变流器
+	DevTypeSVG                       DevTypeID = 29 // SVG
+	DevTypePTCabinet                 DevTypeID = 30 // PT柜
+	DevTypeBusProtection             DevTypeID = 31 // 母线保护
+	DevTypeCleaningDevice            DevTypeID = 32 // 清扫机器人
+	DevTypeDirectCurrentCabinet      DevTypeID = 33 // 直流屏
+	DevTypePublicMeasurementControl  DevTypeID = 34 // 公用测控
+	DevTypePCS                       DevTypeID = 37 // 储能变流器 (Energiespeichersystem)
+	DevTypeOptimizer                 DevTypeID = 41 // 优化器
+	DevTypeBattery                   DevTypeID = 43 // 电池
+	DevTypeBatteryClusterMgmt        DevTypeID = 44 // 电池簇管理单元
+	DevTypeLocalController           DevTypeID = 45 // 本地控制器
+	DevTypeCharger                   DevTypeID = 51 // 充电桩
+	DevTypeBatterySystemController   DevTypeID = 52 // 电池系统控制器
+	DevTypeMicroinverter             DevTypeID = 55 // 微型逆变器
+	DevTypeDieselGenerator           DevTypeID = 63 // 柴油发电机
+)
+
+var devTypeNames = map[DevTypeID]string{
+	DevTypeInverter:                  "逆变器",
+	DevTypeContainer:                 "集装箱",
+	DevTypeGridConnectionPoint:       "并网点",
+	DevTypeCombinerBox:               "汇流箱",
+	DevTypeMeteoStation:              "环境监测仪",
+	DevTypeTransformer:               "变压器",
+	DevTypeMeter:                     "电表",
+	DevTypeUPS:                       "UPS",
+	DevTypeDataLogger:                "数据采集器",
+	DevTypeString:                    "组串",
+	DevTypePlant:                     "电站",
+	DevTypeCircuitProtection:         "线路保护",
+	DevTypeSplittingDevice:           "解列装置",
+	DevTypeEnergyStorageSystem:       "储能逆变器",
+	DevTypeSamplingDevice:            "采集设备",
+	DevTypeEMU:                       "EMU",
+	DevTypeUnit:                      "单元",
+	DevTypeTempHumiditySensor:        "温湿度传感器",
+	DevTypeIntelligentPowerCabinet:   "智能配电柜",
+	DevTypeDisplayDevice:             "显示设备",
+	DevTypeACPowerDistributedCabinet: "交流配电柜",
+	DevTypeCommunicationModule:       "通信模块",
+	DevTypeSystemBMS:                 "系统BMS",
+	DevTypeArrayBMS:                  "阵列BMS",
+	DevTypeDCDC:                      "直流-直流",
+	DevTypeEnergyManagementSystem:    "能量管理系统",
+	DevTypeTrackingSystem:            "跟踪系统",
+	DevTypeWindEnergyConverter:       "风能变流器",
+	DevTypeSVG:                       "SVG",
+	DevTypePTCabinet:                 "PT柜",
+	DevTypeBusProtection:             "母线保护",
+	DevTypeCleaningDevice:            "清扫机器人",
+	DevTypeDirectCurrentCabinet:      "直流屏",
+	DevTypePublicMeasurementControl:  "公用测控",
+	DevTypePCS:                       "储能变流器",
+	DevTypeOptimizer:                 "优化器",
+	DevTypeBattery:                   "电池",
+	DevTypeBatteryClusterMgmt:        "电池簇管理单元",
+	DevTypeLocalController:           "本地控制器",
+	DevTypeCharger:                   "充电桩",
+	DevTypeBatterySystemController:   "电池系统控制器",
+	DevTypeMicroinverter:             "微型逆变器",
+	DevTypeDieselGenerator:           "柴油发电机",
+}
+
+func (t DevTypeID) String() string {
+	if n, ok := devTypeNames[t]; ok {
+		return n
+	}
+	return "未知类型设备"
 }
