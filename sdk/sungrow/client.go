@@ -49,8 +49,13 @@ func (c Credentials) baseURL() string {
 	return strings.TrimRight(c.BaseURL, "/")
 }
 
+// ErrNotLoggedIn 未登录且未开启自动登录
 var ErrNotLoggedIn = errors.New("[Sungrow]: 未获取 Token 令牌")
 
+// ErrMissingCredentials 凭证未填写。构造客户端不再校验凭证，首次请求时才返回本错误
+var ErrMissingCredentials = errors.New("[Sungrow]: 未配置 AppID/AppSecret/UserAccount/UserPassword，请先在 Credentials 中填写")
+
+// loginError 标记登录阶段失败，避免被重试逻辑再次提交密码
 type loginError struct{ err error }
 
 func (e *loginError) Error() string { return e.err.Error() }
@@ -64,8 +69,9 @@ type tokenCarrier interface {
 }
 
 type SungrowSDK struct {
-	creds  Credentials
-	client *req.Client
+	credsMu sync.RWMutex // 保护 creds，允许运行期更换凭证
+	creds   Credentials
+	client  *req.Client
 
 	mu     sync.RWMutex
 	token  string
@@ -101,13 +107,20 @@ func WithTimeout(d time.Duration) Option {
 	}
 }
 
-// WithAccessToken 复用已有 Token，跳过首次获取
-func WithAccessToken(token, refreshToken string, expiresIn time.Duration) Option {
+// WithAccessToken 复用已有 Token，跳过首次获取。
+// 平台未提供 token 有效期字段，expiresIn 为 0 时按 TokenTTL 估算
+func WithAccessToken(token string, expiresIn time.Duration) Option {
 	return func(sdk *SungrowSDK) {
-		if token != "" {
-			sdk.token = token
-			sdk.expiry = time.Now().Add(expiresIn)
+		if strings.TrimSpace(token) == "" {
+			return
 		}
+		if expiresIn <= 0 {
+			expiresIn = TokenTTL
+		}
+		sdk.mu.Lock()
+		sdk.token = token
+		sdk.expiry = time.Now().Add(expiresIn)
+		sdk.mu.Unlock()
 	}
 }
 
@@ -152,6 +165,7 @@ func WithDisableAutoLogin() Option {
 	}
 }
 
+// NewSungrowSDK 创建阳光云 OpenAPI 客户端。凭证允许留空，调用接口时才校验
 func NewSungrowSDK(creds Credentials, opts ...Option) (*SungrowSDK, error) {
 	sdk := &SungrowSDK{
 		creds:       creds,
@@ -159,10 +173,6 @@ func NewSungrowSDK(creds Credentials, opts ...Option) (*SungrowSDK, error) {
 		maxAttempts: MaxAttempts,
 		retryDelay:  RetryBaseDelay,
 		autoLogin:   true,
-	}
-
-	if sdk.client == nil {
-		return nil, errors.New("[Sungrow]: HTTP客户端为空")
 	}
 
 	for _, opt := range opts {
@@ -176,12 +186,20 @@ func NewSungrowSDK(creds Credentials, opts ...Option) (*SungrowSDK, error) {
 func (sdk *SungrowSDK) Client() *req.Client { return sdk.client }
 
 // Credentials 返回凭证副本
-func (sdk *SungrowSDK) Credentials() Credentials { return sdk.creds }
+func (sdk *SungrowSDK) Credentials() Credentials {
+	sdk.credsMu.RLock()
+	defer sdk.credsMu.RUnlock()
+	return sdk.creds
+}
 
-// SetCredentials 后续补充凭证
+// SetCredentials 运行期更换凭证，会同时清空已缓存的 token
 func (sdk *SungrowSDK) SetCredentials(creds Credentials) {
+	sdk.credsMu.Lock()
 	sdk.creds = creds
+	sdk.credsMu.Unlock()
+
 	sdk.client.SetBaseURL(creds.baseURL())
+	sdk.invalidateToken()
 }
 
 // Token 返回当前 access_token
@@ -239,12 +257,17 @@ func (sdk *SungrowSDK) Login() (*TokenResult, error) {
 }
 
 func (sdk *SungrowSDK) login() (*TokenResult, error) {
+	creds := sdk.Credentials()
+	if err := creds.Validate(); err != nil {
+		return nil, ErrMissingCredentials
+	}
+
 	body := TokenRequest{
 		Request: Request{
-			AppKey: sdk.creds.AppID,
+			AppKey: creds.AppID,
 		},
-		UserAccount:  sdk.creds.UserAccount,
-		UserPassword: sdk.creds.UserPassword,
+		UserAccount:  creds.UserAccount,
+		UserPassword: creds.UserPassword,
 	}
 
 	var out TokenResult
@@ -385,6 +408,11 @@ func (sdk *SungrowSDK) backoff(attempt int, lastErr error) time.Duration {
 // 除登录接口外，请求体（内嵌 Request 的结构体指针）会在发送前统一注入 appkey 与 token；
 // token 为空或已失效时先获取并缓存，再发起本次调用
 func (sdk *SungrowSDK) callOnce(path string, body any) (*Envelope, error) {
+	creds := sdk.Credentials()
+	if err := creds.Validate(); err != nil {
+		return nil, &loginError{err: ErrMissingCredentials}
+	}
+
 	if body != nil && path != PathLogin {
 		carrier, ok := body.(tokenCarrier)
 		if !ok {
@@ -397,13 +425,13 @@ func (sdk *SungrowSDK) callOnce(path string, body any) (*Envelope, error) {
 			return nil, &loginError{err: err}
 		}
 
-		carrier.setAuth(sdk.creds.AppID, token)
+		carrier.setAuth(creds.AppID, token)
 	}
 
 	r := sdk.client.R().
-		SetHeader(HeaderXAccessKey, sdk.creds.AppSecret).
+		SetHeader(HeaderXAccessKey, creds.AppSecret).
 		SetHeader("Content-Type", "application/json").
-		SetHeader("sys_code", "901")
+		SetHeader(HeaderSysCode, "901")
 
 	if body != nil {
 		payload, err := json.Marshal(body)

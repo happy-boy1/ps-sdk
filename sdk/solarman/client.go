@@ -37,38 +37,25 @@ type Credentials struct {
 	BaseURL string // 数据中心地址，缺省中国区，国际区用 BaseURLGlobal
 }
 
-// Validate 校验必填项
+// Validate 校验必填项。构造客户端时不调用，仅在发起请求前校验
 func (c Credentials) Validate() error {
 	if strings.TrimSpace(c.AppID) == "" {
-		return errors.New("[Solarman]: AppID 是空值")
+		return ErrMissingCredentials
 	}
 	if strings.TrimSpace(c.AppSecret) == "" {
-		return errors.New("[Solarman]: AppSecret 是空值")
-	}
-	if err := c.validateIdentity(); err != nil {
-		return err
+		return ErrMissingCredentials
 	}
 	if strings.TrimSpace(c.Password) == "" && strings.TrimSpace(c.PasswordSHA256) == "" {
-		return errors.New("[Solarman]: Password 与 PasswordSHA256 不能同时为空")
+		return ErrMissingCredentials
 	}
-	return nil
-}
 
-func (c Credentials) validateIdentity() error {
-	n := 0
-	if strings.TrimSpace(c.Email) != "" {
-		n++
-	}
-	if strings.TrimSpace(c.Mobile) != "" {
-		n++
-		if strings.TrimSpace(c.CountryCode) == "" {
-			return errors.New("[Solarman]: 使用手机号登录时 CountryCode 必填")
+	identities := 0
+	for _, identity := range []string{c.Email, c.Mobile, c.UserName} {
+		if strings.TrimSpace(identity) != "" {
+			identities++
 		}
 	}
-	if strings.TrimSpace(c.UserName) != "" {
-		n++
-	}
-	switch n {
+	switch identities {
 	case 1:
 		return nil
 	case 0:
@@ -102,10 +89,14 @@ func SHA256Hex(s string) string {
 // ErrNotLoggedIn 未获取 Token 且未开启自动获取
 var ErrNotLoggedIn = errors.New("[Solarman]: 尚未获取 access_token")
 
+// ErrMissingCredentials 凭证未填写。构造客户端不再校验凭证，首次请求时才返回本错误
+var ErrMissingCredentials = errors.New("[Solarman]: 未配置 AppID/AppSecret 或登录身份，请先在 Credentials 中填写")
+
 // SolarmanSDK SolarMan 开放平台客户端，并发安全
 type SolarmanSDK struct {
-	creds  Credentials
-	client *req.Client
+	credsMu sync.RWMutex // 保护 creds，允许运行期更换凭证
+	creds   Credentials
+	client  *req.Client
 
 	mu           sync.RWMutex // 保护 token
 	token        string
@@ -202,18 +193,14 @@ func WithDisableAutoLogin() Option {
 	}
 }
 
-// NewSolarmanSDK 创建 SolarMan 客户端
+// NewSolarmanSDK 创建 SolarMan 客户端。凭证允许留空，真正发起请求时才校验
 func NewSolarmanSDK(creds Credentials, opts ...Option) (*SolarmanSDK, error) {
 	sdk := &SolarmanSDK{
 		creds:       creds,
-		client:      req.C().SetBaseURL(creds.baseURL()).SetTimeout(30 * time.Second),
+		client:      req.C().SetBaseURL(creds.baseURL()).SetTimeout(DefaultTimeout),
 		language:    LangZh,
-		maxAttempts: 2,
+		maxAttempts: DefaultMaxAttempts,
 		autoLogin:   true,
-	}
-
-	if sdk.client == nil {
-		return nil, errors.New("[SolarMan]: HTTP客户端为空")
 	}
 
 	for _, opt := range opts {
@@ -226,12 +213,20 @@ func NewSolarmanSDK(creds Credentials, opts ...Option) (*SolarmanSDK, error) {
 func (sdk *SolarmanSDK) Client() *req.Client { return sdk.client }
 
 // Credentials 返回凭证副本
-func (sdk *SolarmanSDK) Credentials() Credentials { return sdk.creds }
+func (sdk *SolarmanSDK) Credentials() Credentials {
+	sdk.credsMu.RLock()
+	defer sdk.credsMu.RUnlock()
+	return sdk.creds
+}
 
-// SetCredentials 后续补充凭证
+// SetCredentials 运行期更换凭证，会同时清空已缓存的 Token
 func (sdk *SolarmanSDK) SetCredentials(creds Credentials) {
+	sdk.credsMu.Lock()
 	sdk.creds = creds
+	sdk.credsMu.Unlock()
+
 	sdk.client.SetBaseURL(creds.baseURL())
+	sdk.Logout()
 }
 
 // Token 返回当前 access_token
@@ -291,26 +286,30 @@ type TokenResult struct {
 // AcquireToken 调用 2.1 获取 Token 并缓存。
 // req 中留空的字段会用凭证里的值补齐，因此 AcquireToken(TokenRequest{}) 等价于 Login()
 func (sdk *SolarmanSDK) AcquireToken(req TokenRequest) (*TokenResult, error) {
+	creds := sdk.Credentials()
 	if strings.TrimSpace(req.AppSecret) == "" {
-		req.AppSecret = sdk.creds.AppSecret
+		req.AppSecret = creds.AppSecret
 	}
 	if strings.TrimSpace(req.Password) == "" {
-		req.Password = sdk.creds.passwordSHA256()
+		req.Password = creds.passwordSHA256()
 	}
 	if strings.TrimSpace(req.CountryCode) == "" {
-		req.CountryCode = sdk.creds.CountryCode
+		req.CountryCode = creds.CountryCode
 	}
 	if strings.TrimSpace(req.Email) == "" {
-		req.Email = sdk.creds.Email
+		req.Email = creds.Email
 	}
 	if strings.TrimSpace(req.Mobile) == "" {
-		req.Mobile = sdk.creds.Mobile
+		req.Mobile = creds.Mobile
 	}
 	if strings.TrimSpace(req.Username) == "" {
-		req.Username = sdk.creds.UserName
+		req.Username = creds.UserName
 	}
-	if req.OrgID == nil && sdk.creds.OrgID > 0 {
-		req.OrgID = Int64Ptr(sdk.creds.OrgID)
+	if req.OrgID == nil && creds.OrgID > 0 {
+		req.OrgID = Int64Ptr(creds.OrgID)
+	}
+	if err := validateTokenRequest(req); err != nil {
+		return nil, err
 	}
 
 	var out TokenResult
@@ -327,7 +326,7 @@ func (sdk *SolarmanSDK) AcquireToken(req TokenRequest) (*TokenResult, error) {
 	sdk.uid = out.UID.Int()
 	ttl := time.Duration(out.ExpiresIn.Int()) * time.Second
 	if ttl <= 0 {
-		ttl = 60 * 24 * time.Hour // 文档：默认约 60 天
+		ttl = TokenDefaultTTL // 文档：默认约 60 天
 	}
 	sdk.expiry = time.Now().Add(ttl)
 	sdk.mu.Unlock()
@@ -336,16 +335,35 @@ func (sdk *SolarmanSDK) AcquireToken(req TokenRequest) (*TokenResult, error) {
 	return &out, nil
 }
 
+// validateTokenRequest 获取 Token 前的必填项校验，避免把无效请求发给平台
+func validateTokenRequest(req TokenRequest) error {
+	if strings.TrimSpace(req.AppSecret) == "" {
+		return ErrMissingCredentials
+	}
+	if strings.TrimSpace(req.Password) == "" {
+		return ErrMissingCredentials
+	}
+	if strings.TrimSpace(req.Email) == "" && strings.TrimSpace(req.Mobile) == "" &&
+		strings.TrimSpace(req.Username) == "" {
+		return ErrMissingCredentials
+	}
+	if strings.TrimSpace(req.Mobile) != "" && strings.TrimSpace(req.CountryCode) == "" {
+		return errors.New("[Solarman]: 使用手机号登录时 CountryCode 必填")
+	}
+	return nil
+}
+
 // Login 按凭证里的登录身份获取 Token
 func (sdk *SolarmanSDK) Login() error {
+	creds := sdk.Credentials()
 	req := TokenRequest{
-		CountryCode: sdk.creds.CountryCode,
-		Email:       sdk.creds.Email,
-		Mobile:      sdk.creds.Mobile,
-		Username:    sdk.creds.UserName,
+		CountryCode: creds.CountryCode,
+		Email:       creds.Email,
+		Mobile:      creds.Mobile,
+		Username:    creds.UserName,
 	}
-	if sdk.creds.OrgID > 0 {
-		req.OrgID = Int64Ptr(sdk.creds.OrgID)
+	if creds.OrgID > 0 {
+		req.OrgID = Int64Ptr(creds.OrgID)
 	}
 	_, err := sdk.AcquireToken(req)
 	return err
@@ -353,7 +371,9 @@ func (sdk *SolarmanSDK) Login() error {
 
 // LoginWithOrg 切换到指定商家并重新获取 Token
 func (sdk *SolarmanSDK) LoginWithOrg(orgID int64) error {
+	sdk.credsMu.Lock()
 	sdk.creds.OrgID = orgID
+	sdk.credsMu.Unlock()
 	return sdk.Login()
 }
 
@@ -378,7 +398,7 @@ func (sdk *SolarmanSDK) ensureToken() (string, error) {
 	token, expiry := sdk.token, sdk.expiry
 	sdk.mu.RUnlock()
 
-	if token != "" && time.Now().Before(expiry.Add(-5*time.Minute)) {
+	if token != "" && time.Now().Before(expiry.Add(-TokenRefreshAhead)) {
 		return token, nil
 	}
 	if !sdk.autoLogin {
@@ -387,6 +407,18 @@ func (sdk *SolarmanSDK) ensureToken() (string, error) {
 		}
 		return "", ErrNotLoggedIn
 	}
+
+	sdk.loginMu.Lock()
+	defer sdk.loginMu.Unlock()
+
+	// 二次确认：并发请求下只让第一个进入的协程真正获取 Token
+	sdk.mu.RLock()
+	token, expiry = sdk.token, sdk.expiry
+	sdk.mu.RUnlock()
+	if token != "" && time.Now().Before(expiry.Add(-TokenRefreshAhead)) {
+		return token, nil
+	}
+
 	if err := sdk.Login(); err != nil {
 		return "", err
 	}
@@ -406,41 +438,29 @@ func (sdk *SolarmanSDK) invalidateToken() {
 
 // do 发送请求并解析到 out，out 需内嵌 Response
 func (sdk *SolarmanSDK) do(path string, body, out any, noAuth bool) error {
-	raw, err := sdk.call(path, body, noAuth)
+	res, err := sdk.call(path, body, nil, noAuth)
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		return &BadResponseError{Path: path, Body: string(raw)}
+	if out == nil {
+		return nil
 	}
-	if r, ok := out.(responder); ok {
-		if resp := r.base(); !resp.OK() {
-			return &APIError{Path: path, Code: resp.Code, Msg: resp.Msg, RequestID: resp.RequestID}
-		}
+	if err := json.Unmarshal(res.raw, out); err != nil {
+		return &BadResponseError{Path: path, Body: string(res.raw)}
 	}
-	fillRaw(raw, out)
+	fillRaw(res.raw, out)
 	return nil
 }
 
 // Call 调用任意接口并返回原始响应，用于读取未建模的字段
 func (sdk *SolarmanSDK) Call(path string, body any) (ItemMap, error) {
-	var out struct {
-		Response
-	}
-	var raw json.RawMessage
-	var err error
-	if raw, err = sdk.call(path, body, false); err != nil {
+	res, err := sdk.call(path, body, nil, false)
+	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, &BadResponseError{Path: path, Body: string(raw)}
-	}
-	if !out.OK() {
-		return nil, &APIError{Path: path, Code: out.Code, Msg: out.Msg, RequestID: out.RequestID}
-	}
 	var m ItemMap
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, &BadResponseError{Path: path, Body: string(raw)}
+	if err := json.Unmarshal(res.raw, &m); err != nil {
+		return nil, &BadResponseError{Path: path, Body: string(res.raw)}
 	}
 	return m, nil
 }
@@ -448,39 +468,34 @@ func (sdk *SolarmanSDK) Call(path string, body any) (ItemMap, error) {
 // doAppAuth 用 appId + appSecret（query 参数）鉴权，不带 bearer Token。
 // 适用于文档中没有 authorization 头的接口：2.4 注册帐号、2.8 重置密码、5.1 生成验证码
 func (sdk *SolarmanSDK) doAppAuth(path string, body, out any) error {
-	if strings.TrimSpace(sdk.creds.AppID) == "" || strings.TrimSpace(sdk.creds.AppSecret) == "" {
-		return errors.New("[Solarman]: 该接口需要 AppID 与 AppSecret，请先在 Credentials 中填写")
+	creds := sdk.Credentials()
+	if strings.TrimSpace(creds.AppID) == "" || strings.TrimSpace(creds.AppSecret) == "" {
+		return ErrMissingCredentials
 	}
 
-	raw, err := sdk.callWithQuery(path, body, map[string]string{
-		QueryAppID:     sdk.creds.AppID,
-		QueryAppSecret: sdk.creds.AppSecret,
-	}, true)
+	extra := map[string]string{QueryAppID: creds.AppID, QueryAppSecret: creds.AppSecret}
+	res, err := sdk.call(path, body, extra, true)
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		return &BadResponseError{Path: path, Body: string(raw)}
+	if out == nil {
+		return nil
 	}
-	if r, ok := out.(responder); ok {
-		if resp := r.base(); !resp.OK() {
-			return &APIError{Path: path, Code: resp.Code, Msg: resp.Msg, RequestID: resp.RequestID}
-		}
+	if err := json.Unmarshal(res.raw, out); err != nil {
+		return &BadResponseError{Path: path, Body: string(res.raw)}
 	}
-	fillRaw(raw, out)
+	fillRaw(res.raw, out)
 	return nil
 }
 
-// call 发送请求，鉴权失效时自动重新获取 Token 并重试
-func (sdk *SolarmanSDK) call(path string, body any, noAuth bool) (json.RawMessage, error) {
-	return sdk.callWithQuery(path, body, nil, noAuth)
-}
-
-// callWithQuery 发送请求，可附加 query 参数
-func (sdk *SolarmanSDK) callWithQuery(path string, body any, extra map[string]string, noAuth bool) (json.RawMessage, error) {
+// call 发送请求，鉴权失效时自动重新获取 Token 并重试一次
+func (sdk *SolarmanSDK) call(path string, body any, extra map[string]string, noAuth bool) (*envelope, error) {
 	attempts := sdk.maxAttempts
 	if attempts < 1 {
-		attempts = 1
+		attempts = DefaultMaxAttempts
+	}
+	if !noAuth && sdk.autoLogin && attempts < 2 {
+		attempts = 2 // 鉴权失效时至少留一次重新获取 Token 的机会
 	}
 
 	var lastErr error
@@ -489,40 +504,55 @@ func (sdk *SolarmanSDK) callWithQuery(path string, body any, extra map[string]st
 			sdk.invalidateToken()
 		}
 
-		token := ""
-		if !noAuth {
-			t, err := sdk.ensureToken()
-			if err != nil {
-				return nil, err
-			}
-			token = t
-		}
-
-		raw, err := sdk.post(path, body, token, noAuth, extra)
+		res, err := sdk.callOnce(path, body, extra, noAuth)
 		if err != nil {
 			return nil, err
 		}
-
-		var probe Response
-		if err := json.Unmarshal(raw, &probe); err != nil {
-			return nil, &BadResponseError{Path: path, Body: string(raw)}
-		}
-		if probe.OK() {
-			return raw, nil
+		if res.env.OK() {
+			return res, nil
 		}
 
-		apiErr := &APIError{Path: path, Code: probe.Code, Msg: probe.Msg, RequestID: probe.RequestID}
+		apiErr := &APIError{
+			Path:      path,
+			Code:      res.env.Code,
+			Msg:       res.env.Msg,
+			RequestID: res.env.RequestID,
+		}
 		if apiErr.IsAuthError() && sdk.autoLogin && !noAuth && i < attempts-1 {
 			lastErr = apiErr
-			sdk.logf("[Solarman] %s 鉴权失效(%s)，重新获取 Token 后重试", path, probe.Code)
+			sdk.logf("[Solarman] %s 鉴权失效(%s)，重新获取 Token 后重试", path, res.env.Code)
 			continue
 		}
-		return raw, nil // 其余业务错误保留原始报文，由 do 统一转换
+		return nil, apiErr
 	}
 	return nil, lastErr
 }
 
+// callOnce 发送单次请求，并校验响应码
+func (sdk *SolarmanSDK) callOnce(path string, body any, extra map[string]string, noAuth bool) (*envelope, error) {
+	token := ""
+	if !noAuth {
+		t, err := sdk.ensureToken()
+		if err != nil {
+			return nil, err
+		}
+		token = t
+	}
+
+	raw, err := sdk.post(path, body, token, noAuth, extra)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &envelope{raw: raw}
+	if err := json.Unmarshal(raw, &res.env); err != nil {
+		return nil, &BadResponseError{Path: path, Body: string(raw)}
+	}
+	return res, nil
+}
+
 func (sdk *SolarmanSDK) post(path string, body any, token string, noAuth bool, extra map[string]string) (json.RawMessage, error) {
+	creds := sdk.Credentials()
 	payload, err := marshalBody(body)
 	if err != nil {
 		return nil, fmt.Errorf("[Solarman]%s 请求体序列化失败: %w", path, err)
@@ -530,7 +560,7 @@ func (sdk *SolarmanSDK) post(path string, body any, token string, noAuth bool, e
 
 	params := map[string]string{QueryLanguage: sdk.language}
 	if noAuth || sdk.appIDInQuery {
-		params[QueryAppID] = sdk.creds.AppID
+		params[QueryAppID] = creds.AppID
 	}
 	for k, v := range extra {
 		params[k] = v
@@ -549,9 +579,8 @@ func (sdk *SolarmanSDK) post(path string, body any, token string, noAuth bool, e
 		return nil, fmt.Errorf("[Solarman]%s 请求失败: %w", path, err)
 	}
 
-	raw := resp.Bytes()
 	sdk.logf("[Solarman] %s <= %d", path, resp.StatusCode)
-	return raw, nil
+	return resp.Bytes(), nil
 }
 
 // marshalBody 请求体序列化，空请求体发送 {}
@@ -571,7 +600,7 @@ func marshalBody(body any) ([]byte, error) {
 
 // fillRaw 为结果填充原始响应，支持顶层结构体、切片与嵌套结构体
 func fillRaw(data json.RawMessage, out any) {
-	if len(data) == 0 || string(data) == "null" {
+	if len(data) == 0 || string(data) == "null" || out == nil {
 		return
 	}
 	rv := reflect.ValueOf(out)

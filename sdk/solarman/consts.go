@@ -1,5 +1,7 @@
 package solarman
 
+import "time"
+
 // 平台常量
 const (
 	PlatformName = "Solarman"
@@ -9,6 +11,14 @@ const (
 	BaseURLGlobal = "https://globalapi.solarmanpv.com"
 	// DefaultBaseURL 默认数据中心
 	DefaultBaseURL = BaseURLChina
+)
+
+// 客户端默认参数
+const (
+	DefaultTimeout     = 30 * time.Second
+	DefaultMaxAttempts = 2
+	TokenRefreshAhead  = 5 * time.Minute // 提前重新获取 Token 的窗口
+	TokenDefaultTTL    = 60 * 24 * time.Hour
 )
 
 // 请求头与查询参数

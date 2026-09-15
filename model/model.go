@@ -47,16 +47,16 @@ type PowerStation struct {
 	StationID        uint64     `gorm:"column:station_id;type:bigint unsigned;autoIncrement;primaryKey;comment:电站内部ID"`
 	PlatformID       int16      `gorm:"column:platform_id;type:smallint;uniqueIndex:uk_platform_station,priority:1;index:idx_platform;not null;comment:所属平台ID"`
 	StationIDOrigin  string     `gorm:"column:station_id_origin;type:varchar(64);uniqueIndex:uk_platform_station,priority:2;not null;comment:平台原始电站ID"`
-	StationName      string     `gorm:"column:station_name;type:varchar(256);default:'';index:idx_station_name;comment:电站名称"`
+	StationName      string     `gorm:"column:station_name;type:varchar(256);not null;default:'';index:idx_station_name;comment:电站名称"`
 	StationShortName string     `gorm:"column:station_short_name;type:varchar(128);comment:电站简称"`
-	CapacityKwp      float64    `gorm:"column:capacity_kwp;type:decimal(12,3);comment:装机容量(kWp);check:capacity_kwp > 0"`
+	CapacityKwp      *float64   `gorm:"column:capacity_kwp;type:decimal(12,3);comment:装机容量(kWp);check:capacity_kwp > 0"`
 	Province         string     `gorm:"column:province;type:varchar(64);comment:省份"`
 	City             string     `gorm:"column:city;type:varchar(64);comment:城市"`
 	Address          string     `gorm:"column:address;type:varchar(256);comment:详细地址"`
 	Longitude        float64    `gorm:"column:longitude;type:decimal(10,6);comment:经度"`
 	Latitude         float64    `gorm:"column:latitude;type:decimal(9,6);comment:纬度"`
 	GridConnectedAt  *time.Time `gorm:"column:grid_connected_at;type:date;comment:并网日期"`
-	Status           int8       `gorm:"column:status;type:tinyint;default:1;comment:电站状态"`
+	Status           int8       `gorm:"column:status;type:tinyint;not null;default:1;comment:电站状态:0停运,1运行,2在建"`
 	BaseModel
 
 	Platform *PlatformInfo `gorm:"foreignKey:PlatformID;references:PlatformID;constraint:OnUpdate:CASCADE,OnDelete:RESTRICT"`
@@ -87,7 +87,8 @@ type PowerDevice struct {
 	DeviceAlias      string     `gorm:"column:device_alias;type:varchar(256);comment:设备别称"`
 	DeviceModel      string     `gorm:"column:device_model;type:varchar(128);comment:设备型号"`
 	Brand            string     `gorm:"column:brand;type:varchar(64);comment:品牌"`
-	RatedPowerKw     float64    `gorm:"column:rated_power_kw;type:decimal(12,3);comment:额定功率(kW)"`
+	RatedPowerKw     *float64   `gorm:"column:rated_power_kw;type:decimal(12,3);comment:额定功率(kW)"`
+	Status           int8       `gorm:"column:status;type:tinyint;not null;default:0;comment:设备状态:0未知,1在线,2离线,3告警"`
 	InstalledAt      *time.Time `gorm:"column:installed_at;type:date;comment:投运日期"`
 	BaseModel
 

@@ -7,10 +7,32 @@
 | 华为 FusionSolar SmartPVMS | `sdk/huawei` | SmartPVMS 26.2.0 北向接口参考 | API 账户登录 + XSRF-TOKEN |
 | 锦浪 Ginlong / SolisCloud | `sdk/ginlong` | 锦浪云平台 API 文档 V2.0.3 | KeyID/KeySecret + HMAC-SHA1 签名 |
 | SolarMan 小麦智电 / 小麦商家版 | `sdk/solarman` | SolarMan OpenApi 在线文档 V2.0.3 | OAuth2 Bearer Token（60 天） |
+| 阳光云 Sungrow iSolarCloud | `sdk/sungrow` | Sungrow OpenApi 文档 | appkey + x-access-key + Token |
+
+`service` 包在四个 SDK 之上提供统一的数据接入层：把各平台的电站与设备归一后写入数据库。
 
 ## 目录结构
 
 ```
+service/                  统一接入层（平台适配、字段归一、落库、同步编排）
+  doc.go                  包说明
+  platform.go             平台常量与元信息（ID / 短码 / 默认地址）
+  devicetype.go           统一设备类型目录与各平台类型编码映射
+  status.go               电站与设备状态枚举
+  errors.go               统一错误、日志出口、部分成功错误
+  adapter.go              适配器接口与平台构造器注册表
+  factory.go              客户端构造与 ClientMethod 统一能力
+  resolve.go              凭据解析（环境变量优先，其次 platform_auth 表）
+  store.go                基础数据写入与电站/设备 UPSERT
+  sync.go                 同步编排、SyncAll、Client
+  syncresult.go           同步结果
+  convert.go              时间与数值的容错转换
+  *_client.go             四个平台的适配器实现
+  *_test.go               单元测试
+
+pkg/database/sql.go       数据库连接（环境变量可覆盖，返回错误而非 panic）
+pkg/tools/jsonfile.go     JSON 文件读写
+
 sdk/huawei/
   client.go               客户端、凭证、Token 管理、请求内核（305 重登录 / 限流重试）
   consts.go               路径、错误码、设备类型、业务枚举
@@ -46,10 +68,134 @@ sdk/solarman/
   api_station.go          4.1~4.12、4.16 电站查询与写操作
   api_weather.go          4.17~4.19 天气接口
 
-cmd/ginlong/main.go       锦浪调用示例（凭证留空，测试时填写）
-cmd/solarman/main.go      SolarMan 调用示例（凭证留空，测试时填写）
-main.go                   华为调用示例
+sdk/sungrow/
+  client.go               客户端 SungrowSDK、凭证、Token 管理、请求内核（自动登录）
+  consts.go               路径、返回码、设备类型/电站类型/在线状态枚举
+  types.go                Envelope 响应封装、Num/Int64/Str 容错标量、Entity、ItemMap
+  api_token.go            登录、登录状态枚举、共享类型
+  api_monitor.go          电站列表、设备列表、设备实时测点数据
+
+main.go                   命令行入口：同步或查看各平台数据
+cmd/ginlong/main.go       锦浪 SDK 调用示例
+cmd/solarman/main.go      SolarMan SDK 调用示例
 ```
+
+---
+
+# service 统一接入层
+
+## 能力
+
+- **统一适配**：四个平台的鉴权方式、分页字段、设备类型编码差异全部收敛在适配器内部，
+  上层只依赖 `service.Adapter`。
+- **字段归一**：平台原始电站/设备 ID 落在 `station_id_origin` / `device_id_origin`，
+  与 `platform_id` 组成幂等键；统一设备类型见 `service/devicetype.go`。
+- **幂等落库**：按「平台 + 原始 ID」UPSERT，重复同步不会产生脏数据。
+- **局部容错**：单个电站或单个设备族失败不影响其余数据，结果中按「失败 / 告警」分别汇报。
+
+## 快速开始
+
+```go
+package main
+
+import (
+    "log"
+
+    "ps-sdk/pkg/database"
+    "ps-sdk/service"
+)
+
+func main() {
+    if err := database.Init(); err != nil { // 连接参数可用 PS_DB_* 环境变量覆盖
+        log.Fatal(err)
+    }
+    defer database.Close()
+
+    if err := service.Init(database.DB); err != nil { // 自动补表 + 写入平台/设备类型基础数据
+        log.Fatal(err)
+    }
+
+    client, err := service.PlatformClient("solarman", service.Options{
+        Timeout: 30 * time.Second,
+        Debug:   true,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    result, err := client.Sync()
+    log.Println(result) // 小麦智电: 电站 96/96，设备 1296/1296，失败 0 项，告警 0 项
+    if err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+命令行方式：
+
+```bash
+go run . -platform solarman     # 同步指定平台
+go run . -platform all          # 同步全部已配置凭据的平台
+go run . -list                  # 只读库，打印已同步的电站与设备
+go run . -seed                  # 只写入平台/设备类型基础数据
+go run . -platform ginlong -debug
+```
+
+## 接口
+
+| 方法 | 说明 |
+| --- | --- |
+| `Init(db)` | 注入数据库句柄，自动补表并写入平台与设备类型基础数据 |
+| `Seed()` | 仅写入基础数据，可重复调用 |
+| `PlatformClient(code, opts)` | 按平台短码创建客户端 |
+| `NewAdapter(cred, opts)` | 用显式凭据创建适配器 |
+| `NewClient(adapter)` | 用自定义适配器创建客户端，便于测试 |
+| `(*Client).Sync()` | 拉取电站与设备并落库，返回 `*SyncResult` |
+| `(*Client).SyncStations()` | 只拉取电站并落库 |
+| `(*Client).SyncDevices(stationID)` | 只拉取指定电站的设备并落库 |
+| `(*Client).Stations()` / `Devices(id)` | 只读库，stationID 为 0 表示全部电站 |
+| `ListStations(platformID)` / `ListDevices(platformID, stationID)` | 读取已落库数据，platformID 为 0 表示全部平台 |
+| `UpsertStation(s)` / `UpsertDevice(d)` | 手动写入单条记录 |
+| `SyncAll(opts)` | 遍历全部平台同步，单平台失败不影响其余 |
+
+平台短码：`solarman`、`sungrow`、`ginlong`、`huawei`（即 `service.CodeXxx`）。
+
+## 凭据
+
+凭据优先取环境变量，其次取 `platform_auth` 表。命名规则 `PS_<平台短码大写>_<字段>`：
+
+| 平台 | 环境变量 |
+| --- | --- |
+| solarman | `PS_SOLARMAN_APPID`、`PS_SOLARMAN_APPSECRET`、`PS_SOLARMAN_ACCOUNT`、`PS_SOLARMAN_PASSWORD`、`PS_SOLARMAN_ORGID`、`PS_SOLARMAN_COUNTRYCODE` |
+| sungrow | `PS_SUNGROW_APPID`、`PS_SUNGROW_APPSECRET`、`PS_SUNGROW_ACCOUNT`、`PS_SUNGROW_PASSWORD` |
+| ginlong | `PS_GINLONG_APPID`、`PS_GINLONG_APPSECRET` |
+| huawei | `PS_HUAWEI_APPID`（API 账户名）、`PS_HUAWEI_PASSWORD` |
+| 通用 | `PS_<平台>_APIURL` 覆盖接口地址；`PS_DB_DSN` / `PS_DB_HOST` / `PS_DB_PORT` / `PS_DB_USER` / `PS_DB_PASSWORD` / `PS_DB_NAME` 覆盖数据库连接 |
+
+`PS_SUNGROW_ACCOUNT` 是阳光云的登录账号（appkey 只是应用标识，不能当账号用）；
+华为的 API 账户名与密码分别放在 `app_id` / `app_secret` 两列。
+账号类字段（`ACCOUNT` / `PASSWORD`）没有对应的数据表列，必须用环境变量提供。
+
+## 设备类型归一
+
+统一设备类型的 ID 段位：`11xx` 光伏类、`12xx` 储能类、`13xx` 计量与采集类、`14xx` 环境与其他。
+每个平台自己的类型编码保留在 `PowerDevice.DeviceTypeOrigin`，映射表见 `service/devicetype.go`，
+未登记的平台编码归入 `UNKNOWN`，可通过 `service.KnownDeviceTypes("solarman")` 查看已登记编码。
+
+平台状态值统一换算为：
+
+| 域 | 取值 |
+| --- | --- |
+| 电站状态（`model.PowerStation.Status`） | 0 停运、1 运行、2 在建 |
+| 设备状态（`model.PowerDevice.Status`） | 0 未知、1 在线、2 离线、3 告警 |
+
+## 已知平台限制
+
+- 锦浪云没有统一设备列表接口，按设备族（逆变器 / 采集器 / EPM / 电表 / 气象仪）逐个拉取。
+  某一族接口未开通权限时（`R0000`）返回 `*PartialError`，其余设备照常入库，
+  该情况计入 `SyncResult.Warnings` 而非失败。
+- 华为设备列表需先取电站编号并按 100 个电站批量查询，电站列表不返回在线状态。
+- 阳光云设备列表按电站 `ps_id` 过滤，设备类型编码与文档标注的类型不一致（两种形态都兼容）。
 
 ---
 
@@ -74,6 +220,9 @@ if err != nil {
 // 登录是隐式的：首次调用任意接口时自动登录
 stations, err := sdk.GetStationList(huawei.StationListRequest{PageNo: 1})
 ```
+
+凭证允许留空构造，只有**真正发起请求时**才会返回 `huawei.ErrMissingCredentials`；
+也可以用 `sdk.SetCredentials(...)` 后续补充（会同时清空已缓存的 token）。
 
 ### 可选项
 
@@ -222,11 +371,14 @@ type huawei.Time struct{ time.Time } // 解析 2020-02-06T00:00:00+08:00，兼�
 ## 快速开始
 
 ```go
-c := ginlong.NewClient(ginlong.Credentials{
+c, err := ginlong.NewSolisSDK(ginlong.Credentials{
     APIID:     "",   // KeyID，锦浪云 WEB 端「服务 - API 管理」获取
     APISecret: "",   // KeySecret
     // BaseURL: ginlong.DefaultBaseURL, // 缺省 https://api.ginlong.com:13333
 }, ginlong.WithDebugf(log.Printf))
+if err != nil {
+    log.Fatal(err)
+}
 
 // 账号下电站列表
 res, err := c.UserStationList(ginlong.UserStationListRequest{
@@ -424,7 +576,7 @@ for _, inv := range res.Page.Records {
 ## 快速开始
 
 ```go
-sdk := solarman.NewSolarmanSDK(solarman.Credentials{
+sdk, err := solarman.NewSolarmanSDK(solarman.Credentials{
     AppID:     "", // 应用 APPID
     AppSecret: "", // 应用密钥
     Email:     "", // 登录身份三选一：Email / Mobile(+CountryCode) / UserName
@@ -432,6 +584,9 @@ sdk := solarman.NewSolarmanSDK(solarman.Credentials{
     OrgID:     0,  // 商家版填商家 ID，C 端留 0
     // BaseURL: solarman.BaseURLGlobal, // 国际数据中心
 }, solarman.WithDebugf(log.Printf))
+if err != nil {
+    log.Fatal(err)
+}
 
 // 首次调用任意接口时会自动获取 Token，也可以显式获取
 if _, err := sdk.AcquireToken(solarman.TokenRequest{}); err != nil {
@@ -445,9 +600,11 @@ if err != nil {
     log.Fatal(err)
 }
 for _, s := range stations.StationList {
-    fmt.Println(s.ID.Int(), s.Name, s.InstalledCapacity.Float())
+    fmt.Println(s.ID.String(), s.Name, s.InstalledCapacity.Float())
 }
 ```
+
+凭证允许留空构造，只有**真正发起请求时**才会返回 `solarman.ErrMissingCredentials`；也可以用 `sdk.SetCredentials(...)` 后续补充。
 
 ### 可选项
 
@@ -496,6 +653,7 @@ if _, err := sdk.StationList(req); err != nil {
 | `*APIError` | 业务错误（`success=false` 或 `code` 非空），`Hint()` 给出中文提示 |
 | `*BadResponseError` | 响应不是预期的 JSON |
 | `ErrNotLoggedIn` | 关闭自动获取 Token 且本地无 Token |
+| `ErrMissingCredentials` | 凭证未填写 |
 
 `APIError.Retryable()` 对 `3201001`/`2101002`/`3501004` 返回 true；`IsAuthError()` 覆盖各类鉴权失效码。常见码：`2101010` 调用次数用完、`2101009` 接口未开通写权限、`2101026` 分页过大、`2101012`/`2101013` 时间范围超限、`2101022` 请求越权（账号与 Home/Pro 端不一致）。
 
@@ -566,9 +724,9 @@ SolarMan 的响应是**平铺**的——`code` / `msg` / `success` / `requestId`
 
 ```go
 type StationListResult struct {
-    Response                    // 公共响应字段
-    rawHolder                   // 原始数据兜底
-    Total       int             `json:"total"`
+    Response                      // 公共响应字段
+    rawHolder                     // 原始数据兜底
+    Total       int               `json:"total"`
     StationList []StationListItem `json:"stationList"`
 }
 ```
@@ -580,6 +738,9 @@ type StationListResult struct {
 | `Num` | 数值 / 字符串 / null | `.Float()` |
 | `Int64` | 数值 / 字符串 / 空串 / null | `.Int()` |
 | `Str` | 字符串 / 数值 / null | `.String()` |
+
+`StationListItem.ID` 用 `Str` 承接（文档标注 `Number`，实际形态不固定），
+需要按数值下发时自行转换，见 `cmd/solarman/main.go` 的 `stationID` 辅助函数。
 
 **未建模字段的兜底**：结果结构体、列表元素与嵌套结构体都嵌入了原始响应，`fillRaw` 会递归填充：
 
@@ -603,19 +764,137 @@ sdk.Call(solarman.PathStationList, req) // 任意接口拿原始响应
 
 ---
 
+# 阳光云 Sungrow iSolarCloud
+
+## 快速开始
+
+```go
+sdk, err := sungrow.NewSungrowSDK(sungrow.Credentials{
+    AppID:        "", // 应用 appkey
+    AppSecret:    "", // x-access-key
+    UserAccount:  "", // 登录账号
+    UserPassword: "", // 登录密码
+    // BaseURL: sungrow.BaseURLGlobal, // 国际站缺省为中国站
+}, sungrow.WithDebugf(log.Printf))
+if err != nil {
+    log.Fatal(err)
+}
+
+// 登录是隐式的：首次调用业务接口时自动登录并缓存 token
+stations, err := sdk.GetPowerStationList(sungrow.PowerStationListRequest{
+    PageRequest: sungrow.PageRequest{CurPage: 1, Size: 100},
+})
+if err != nil {
+    log.Fatal(err)
+}
+for _, ps := range stations.PageList {
+    fmt.Println(ps.PsId.String(), ps.PsName, ps.TotalCapcity.String())
+}
+```
+
+凭证允许留空构造，只有**真正发起请求时**才会返回 `sungrow.ErrMissingCredentials`；
+也可以用 `sdk.SetCredentials(...)` 后续补充（会同时清空已缓存的 token）。
+
+### 可选项
+
+| Option | 说明 |
+| --- | --- |
+| `WithClient(*req.Client)` / `WithTimeout(d)` / `WithDevMode(true)` | 同其它平台 |
+| `WithAccessToken(token, expiresIn)` | 复用已有 Token；有效期未知时按 24 小时估算 |
+| `WithMaxAttempts(n)` | 含首调在内的最大尝试次数，默认 3 |
+| `WithRetryBaseDelay(d)` | 重试退避基数，默认 2s |
+| `WithDisableAutoLogin()` | 关闭自动登录，无 token 时直接返回错误 |
+
+## 鉴权与请求内核
+
+- 每个请求都带 `x-access-key: {appSecret}`、`sys_code: 901`，请求体内注入 `appkey` 与 `token`。
+  业务请求体都是「内嵌 `Request` 的结构体指针」，由 `callOnce` 统一注入，接口方法内部不关心 token。
+- `POST /openapi/login` 成功后拿 `result_data.token`，SDK 按 `TokenTTL`（24 小时）缓存；
+  剩余不足 5 秒时视为过期并重新登录。登录错误码 `E00003` 会触发丢弃缓存并重试。
+- `E901`（调用频繁）固定等待 1 分钟重试；其余可重试错误按 `WithRetryBaseDelay` 指数退避。
+- 登录失败（账号不存在、密码错误、账户锁定）**不会重试**，避免连续输错导致锁定。
+
+## 错误处理
+
+```go
+_, err := sdk.GetPowerStationList(req)
+if err != nil {
+    var apiErr *sungrow.APIError
+    if errors.As(err, &apiErr) {
+        log.Printf("resultCode=%s hint=%s retryable=%v",
+            apiErr.ResultCode, apiErr.ResultCode.Hint(), apiErr.Retryable())
+    }
+}
+```
+
+| 错误类型 | 说明 |
+| --- | --- |
+| `*APIError` | 业务错误（`result_code != "1"`），`Hint()` 给出中文提示 |
+| `*BadResponseError` | 响应不是预期的 JSON |
+| `ErrNotLoggedIn` | 关闭自动登录且本地无 token |
+| `ErrMissingCredentials` | 凭证未填写 |
+
+关键码：`1` 成功、`E00003` token 失效、`E901` 调用频繁、`E999`/`E998` 小时/月调用次数上限、
+`E918`/`E919` 白名单限制、`E916` 登录频繁、`E913` 时间戳偏差过大。
+
+## 接口清单
+
+| 方法 | 接口 | 路径 |
+| --- | --- | --- |
+| `Login` / `Logout` | 登录 / 注销 | `/openapi/login` |
+| `GetPowerStationList` | 电站列表（分页） | `/openapi/getPowerStationList` |
+| `GetDeviceListByPsID` | 电站下设备列表（按 `ps_id` 过滤，分页） | `/openapi/getDeviceList` |
+| `GetDeviceRealTimeData` | 设备实时测点数据（点表 key 为 `p*`） | `/openapi/getDeviceRealTimeData` |
+
+`consts.go` 中还登记了电站详情、故障告警、测点历史、参数设置、数据订阅等路径常量，
+其中标注「暂时不实现」的部分未提供方法，可按同样模式扩展。
+
+## 类型与容错
+
+| 类型 | 兼容形态 | 用法 |
+| --- | --- | --- |
+| `Num` | 数值 / 字符串 / null | `.Float()` |
+| `Int64` | 数值 / 字符串 / 空串 / null | `.Int()` |
+| `Str` | 字符串 / 数值 / 布尔 / null | `.String()` |
+| `Entity` | `{"unit":"kW","value":"1.5"}` | `.String()` → `1.5 (kW)` |
+
+枚举（`DevTypeID` / `PsType` / `PsOnlineStatus`）兼容 `1` 与 `"1"` 两种形态，
+`DevTypeID.String()` / `PsType.String()` 返回中文名称。
+
+`DevicePointInner` 会把响应里 `p*` 形式的测点收进 `Points`，其余字段保持强类型：
+
+```go
+rtd, _ := sdk.GetDeviceRealTimeData(req)
+for _, dp := range rtd.DevicePointList {
+    fmt.Println(dp.DevicePoint.PsKey, dp.DevicePoint.Points["p1"])
+}
+```
+
+## 注意事项
+
+- 所有接口均为 **POST**，`Content-Type: application/json`。
+- 国际站与国内站地址二选一：`BaseURLChina` / `BaseURLGlobal`。
+- 设备类型编码（`device_type`）文档标注与真实返回不一致，SDK 用 `Str` 承接，`service` 层再做归一。
+- 电站列表用 `PsId`（字符串）标识电站，设备列表返回的 `ps_id` 是数值，两者需按字符串比对。
+
+---
+
 ## 未实现
 
 - 华为 OAuth 2.0 接入方式（文档 3.1 节）：授权码流程、获取/刷新/注销 AT、以 `Authorization: Bearer` 调用 OpenAPI。
 - 锦浪 OAuth 2.0 多账号授权（该部分需与锦浪签署合作协议后单独获取文档）。
 - SolarMan 的 Token「延长」接口：文档只在概述里提到，未给出接口定义；SDK 通过重新获取 Token 达到同样效果（平台允许多次获取且旧 Token 不失效）。
 - SolarMan 设备固件升级接口：`/device/v1.0/upgrade` 只在文档的链接残留里出现过，没有参数说明，`PathDeviceUpgrade` 常量已备好但未实现。
+- 阳光云的参数设置、只读参数、故障告警、测点历史与数据订阅接口：路径常量已登记，方法未实现。
 
 ## 开发
 
 ```bash
 go build ./...
 go vet ./...
-go test ./...    # 使用 httptest 模拟服务端，不访问真实接口
+gofmt -l .       # 应为空
+go test ./...    # sdk/huawei 与 service 使用 httptest/单元测试，不访问真实接口
 ```
 
-调用示例：华为见 `main.go`，锦浪见 `cmd/ginlong/main.go`，SolarMan 见 `cmd/solarman/main.go`（后两者凭证留空，测试时自行填写）。
+调用示例：华为见各 SDK 文档示例，锦浪见 `cmd/ginlong/main.go`，SolarMan 见 `cmd/solarman/main.go`，
+四个平台的统一接入见 `service` 与 `main.go`（`go run . -h` 查看参数）。

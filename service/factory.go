@@ -1,72 +1,26 @@
 package service
 
-import (
-	"errors"
-	"log"
-	"ps-sdk/model"
-	"ps-sdk/sdk/ginlong"
-	"ps-sdk/sdk/huawei"
-	"ps-sdk/sdk/solarman"
-	"ps-sdk/sdk/sungrow"
-)
-
-type SolarmanClient struct {
-	*solarman.SolarmanSDK
+// PlatformClient 创建指定平台的客户端，凭据取环境变量与 platform_auth 表
+func PlatformClient(code string, opts Options) (*Client, error) {
+	return Open(code, opts)
 }
 
-type SungrowClient struct {
-	sungrow.SungrowSDK
+// SolarmanClient 创建 SolarMan（小麦智电 / 小麦商家版）客户端
+func SolarmanClient(opts Options) (*Client, error) {
+	return Open(CodeSolarman, opts)
 }
 
-type SolisClient struct {
-	ginlong.SolisSDK
+// SungrowClient 创建阳光云（iSolarCloud）客户端
+func SungrowClient(opts Options) (*Client, error) {
+	return Open(CodeSungrow, opts)
 }
 
-type FusionSolarClient struct {
-	huawei.FusionSolarSDK
+// GinlongClient 创建锦浪云（SolisCloud）客户端
+func GinlongClient(opts Options) (*Client, error) {
+	return Open(CodeGinlong, opts)
 }
 
-type ClientMethod interface {
-	GetPowerStationList(page, size int) ([]model.PowerStation, error)
-}
-
-func (c *SolarmanClient) GetPowerStationList(page, size int) ([]model.PowerStation, error) {
-	req := solarman.StationListRequest{
-		PageRequest: solarman.PageRequest{
-			Page: page,
-			Size: size,
-		},
-	}
-	stations, err := c.StationList(req)
-	if err != nil {
-		return nil, errors.New("获取电站列表时出错")
-	}
-
-	var powerStations []model.PowerStation
-	for _, station := range stations.StationList {
-		powerStation := station.PowerStation()
-		powerStations = append(powerStations, *powerStation)
-	}
-	return powerStations, nil
-}
-
-func NewSolarmanClient() ClientMethod {
-	sdk, err := solarman.NewSolarmanSDK(
-		solarman.Credentials{
-			AppID:       "2024071755661944",
-			AppSecret:   "916c65304351bed64942e3de056289d1",
-			Mobile:      "13092743221",
-			CountryCode: "86",
-			Password:    "20010923wsljj..",
-			OrgID:       1574,
-		},
-		solarman.WithDebugf(log.Printf),
-	)
-	if err != nil {
-		return nil
-	}
-
-	return &SolarmanClient{
-		SolarmanSDK: sdk,
-	}
+// FusionSolarClient 创建华为 FusionSolar 客户端
+func FusionSolarClient(opts Options) (*Client, error) {
+	return Open(CodeFusionSolar, opts)
 }

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strconv"
+	"strings"
 )
 
 type PageRequest struct {
@@ -103,24 +105,25 @@ type DeviceListByPsIDRequest struct {
 }
 
 type Device struct {
-	ChnnlId            int64     `json:"chnnl_id"`
-	CommunicationDevSn string    `json:"communication_dev_sn"`
-	DevFaultStatus     int64     `json:"dev_fault_status"`
-	DevStatus          string    `json:"dev_status"`
-	DeviceCode         int64     `json:"device_code"`
-	DeviceModelCode    string    `json:"device_model_code"`
-	DeviceModelId      int64     `json:"device_model_id"`
-	DeviceName         string    `json:"device_name"`
-	DeviceSn           string    `json:"device_sn"`
-	DeviceType         DevTypeID `json:"device_type"`
-	FactoryName        string    `json:"factory_name"`
-	GridConnectionDate string    `json:"grid_connection_date"`
-	PsId               int64     `json:"ps_id"`
-	PsKey              string    `json:"ps_key"`
-	RelState           int64     `json:"rel_state"`
-	RelTime            string    `json:"rel_time"`
-	TypeName           string    `json:"type_name"`
-	Uuid               int64     `json:"uuid"`
+	ChnnlId            int64  `json:"chnnl_id"`
+	CommunicationDevSn string `json:"communication_dev_sn"`
+	DevFaultStatus     int64  `json:"dev_fault_status"`
+	DevStatus          Str    `json:"dev_status"`
+	DeviceCode         int64  `json:"device_code"`
+	DeviceModelCode    string `json:"device_model_code"`
+	DeviceModelId      int64  `json:"device_model_id"`
+	DeviceName         string `json:"device_name"`
+	DeviceSn           string `json:"device_sn"`
+	// DeviceType 文档标注为 String，返回可能是 1 或 "1"
+	DeviceType         Str    `json:"device_type"`
+	FactoryName        string `json:"factory_name"`
+	GridConnectionDate string `json:"grid_connection_date"`
+	PsId               int64  `json:"ps_id"`
+	PsKey              string `json:"ps_key"`
+	RelState           int64  `json:"rel_state"`
+	RelTime            string `json:"rel_time"`
+	TypeName           string `json:"type_name"`
+	Uuid               Int64  `json:"uuid"`
 }
 
 type DeviceList PageResult[Device]
@@ -159,7 +162,7 @@ type DevicePointInner struct {
 	PsKey              string         `json:"ps_key"`
 	DeviceSn           string         `json:"device_sn"`
 	DevStatus          int64          `json:"dev_status"`
-	Uuid               int64          `json:"uuid"`
+	Uuid               Int64          `json:"uuid"`
 	DeviceName         string         `json:"device_name"`
 	DevFaultStatus     int64          `json:"dev_fault_status"`
 	PsId               int64          `json:"ps_id"`
@@ -178,19 +181,11 @@ func (d *DevicePointInner) UnmarshalJSON(data []byte) error {
 
 	d.PsKey, _ = raw["ps_key"].(string)
 	d.DeviceSn, _ = raw["device_sn"].(string)
-	if v, ok := raw["dev_status"].(float64); ok {
-		d.DevStatus = int64(v)
-	}
-	if v, ok := raw["uuid"].(float64); ok {
-		d.Uuid = int64(v)
-	}
+	d.DevStatus = anyToInt64(raw["dev_status"])
+	d.Uuid = Int64(anyToInt64(raw["uuid"]))
 	d.DeviceName, _ = raw["device_name"].(string)
-	if v, ok := raw["dev_fault_status"].(float64); ok {
-		d.DevFaultStatus = int64(v)
-	}
-	if v, ok := raw["ps_id"].(float64); ok {
-		d.PsId = int64(v)
-	}
+	d.DevFaultStatus = anyToInt64(raw["dev_fault_status"])
+	d.PsId = anyToInt64(raw["ps_id"])
 	d.CommunicationDevSn, _ = raw["communication_dev_sn"].(string)
 	d.DeviceTime, _ = raw["device_time"].(string)
 
@@ -201,6 +196,43 @@ func (d *DevicePointInner) UnmarshalJSON(data []byte) error {
 		}
 	}
 	return nil
+}
+
+// anyToInt64 把 JSON 解析出的 any 转成 int64，兼容数值与字符串两种形态
+func anyToInt64(v any) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	case string:
+		return parseInt(n)
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i
+		}
+	}
+	return 0
+}
+
+// unmarshalAny 把 JSON 字面量解析为 any，供枚举的容错解析使用
+func unmarshalAny(b []byte) any {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil
+	}
+	return v
+}
+
+// parseInt 宽松解析字符串整数，失败返回 0
+func parseInt(s string) int64 {
+	v, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 func (d *DevicePointInner) MarshalJSON() ([]byte, error) {

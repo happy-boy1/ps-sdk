@@ -39,6 +39,9 @@ func (c Credentials) baseURL() string {
 // ErrNotLoggedIn 未登录且未开启自动登录
 var ErrNotLoggedIn = errors.New("[HuaWei]: 尚未登录")
 
+// ErrMissingCredentials 凭证未填写。构造客户端不再校验凭证，首次请求时才返回本错误
+var ErrMissingCredentials = errors.New("[HuaWei]: 未配置 UserName/SystemCode，请先在 Credentials 中填写")
+
 // loginError 标记登录阶段失败，避免被重试逻辑再次提交密码
 type loginError struct{ err error }
 
@@ -47,8 +50,9 @@ func (e *loginError) Unwrap() error { return e.err }
 
 // FusionSolarSDK FusionSolar 北向 OpenAPI 客户端，并发安全
 type FusionSolarSDK struct {
-	creds  Credentials
-	client *req.Client
+	credsMu sync.RWMutex // 保护 creds，允许运行期更换凭证
+	creds   Credentials
+	client  *req.Client
 
 	mu     sync.RWMutex // 保护 token/expiry
 	token  string
@@ -134,22 +138,15 @@ func WithDisableAutoLogin() Option {
 	}
 }
 
-// NewFusionSolarSDK 创建 FusionSolar 北向接口客户端
+// NewFusionSolarSDK 创建 FusionSolar 北向接口客户端。
+// 凭证允许留空，真正发起请求时才校验
 func NewFusionSolarSDK(creds Credentials, opts ...Option) (*FusionSolarSDK, error) {
-	if err := creds.Validate(); err != nil {
-		return nil, err
-	}
-
 	sdk := &FusionSolarSDK{
 		creds:       creds,
 		client:      req.C().SetBaseURL(creds.baseURL()).SetTimeout(DefaultTimeout),
 		maxAttempts: MaxAttempts,
 		retryDelay:  RetryBaseDelay,
 		autoLogin:   true,
-	}
-
-	if sdk.client == nil {
-		return nil, errors.New("[HuaWei]: HTTP 客户端为空")
 	}
 
 	for _, opt := range opts {
@@ -163,7 +160,21 @@ func NewFusionSolarSDK(creds Credentials, opts ...Option) (*FusionSolarSDK, erro
 func (sdk *FusionSolarSDK) Client() *req.Client { return sdk.client }
 
 // Credentials 返回凭证副本
-func (sdk *FusionSolarSDK) Credentials() Credentials { return sdk.creds }
+func (sdk *FusionSolarSDK) Credentials() Credentials {
+	sdk.credsMu.RLock()
+	defer sdk.credsMu.RUnlock()
+	return sdk.creds
+}
+
+// SetCredentials 运行期更换凭证，会同时清空已缓存的 token
+func (sdk *FusionSolarSDK) SetCredentials(creds Credentials) {
+	sdk.credsMu.Lock()
+	sdk.creds = creds
+	sdk.credsMu.Unlock()
+
+	sdk.client.SetBaseURL(creds.baseURL())
+	sdk.invalidateToken()
+}
 
 // Token 返回当前 XSRF-TOKEN
 func (sdk *FusionSolarSDK) Token() string {
@@ -199,7 +210,12 @@ func (sdk *FusionSolarSDK) Login() error {
 }
 
 func (sdk *FusionSolarSDK) login() error {
-	body := LoginBody{UserName: sdk.creds.UserName, SystemCode: sdk.creds.SystemCode}
+	creds := sdk.Credentials()
+	if err := creds.Validate(); err != nil {
+		return ErrMissingCredentials
+	}
+
+	body := LoginBody{UserName: creds.UserName, SystemCode: creds.SystemCode}
 
 	resp, err := sdk.client.R().SetBody(body).SetContentType("application/json").Post(PathLogin)
 	if err != nil {
@@ -228,7 +244,8 @@ func (sdk *FusionSolarSDK) login() error {
 	return nil
 }
 
-// Logout 注销当前 token，建议非必要不调用
+// Logout 注销当前 token，建议非必要不调用。
+// 服务端注销成功后才清空本地 token，失败时保留以便重试
 func (sdk *FusionSolarSDK) Logout() error {
 	token := sdk.Token()
 	if token == "" {
@@ -239,7 +256,6 @@ func (sdk *FusionSolarSDK) Logout() error {
 		SetBody(LogoutBody{XSRFToken: token}).
 		SetContentType("application/json").
 		Post(PathLogout)
-	sdk.invalidateToken()
 	if err != nil {
 		return fmt.Errorf("[HuaWei]%s 请求失败: %w", PathLogout, err)
 	}
@@ -251,6 +267,8 @@ func (sdk *FusionSolarSDK) Logout() error {
 	if !env.OK() {
 		return newAPIError(PathLogout, env)
 	}
+
+	sdk.invalidateToken()
 	return nil
 }
 

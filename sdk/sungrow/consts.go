@@ -13,7 +13,7 @@ const (
 	HeaderSysCode    = "sys_code"
 	HeaderXAccessKey = "x-access-key"
 	QueryAppID       = "appkey"
-	QUeryToken       = "token"
+	QueryToken       = "token"
 	QueryLanguage    = "lang"
 )
 
@@ -328,4 +328,21 @@ func (t PsOnlineStatus) String() string {
 	default:
 		return "未知状态"
 	}
+}
+
+// 以下枚举都兼容 数值 / 字符串 两种返回形态
+
+func (t *DevTypeID) UnmarshalJSON(b []byte) error {
+	*t = DevTypeID(anyToInt64(unmarshalAny(b)))
+	return nil
+}
+
+func (t *PsType) UnmarshalJSON(b []byte) error {
+	*t = PsType(anyToInt64(unmarshalAny(b)))
+	return nil
+}
+
+func (t *PsOnlineStatus) UnmarshalJSON(b []byte) error {
+	*t = PsOnlineStatus(anyToInt64(unmarshalAny(b)))
+	return nil
 }

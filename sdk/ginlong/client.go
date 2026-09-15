@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/imroc/req/v3"
@@ -45,8 +46,9 @@ var ErrMissingCredentials = errors.New("[Ginlong]: 未配置 APIID/APISecret，�
 
 // Client 锦浪云 API 客户端，并发安全
 type SolisSDK struct {
-	creds  Credentials
-	client *req.Client
+	credsMu sync.RWMutex // 保护 creds，允许运行期更换凭证
+	creds   Credentials
+	client  *req.Client
 
 	signContentType   string
 	headerContentType string
@@ -112,10 +114,6 @@ func WithClock(now func() time.Time) Option {
 
 // NewSolisSDK 创建锦浪云 API 客户端。凭证允许留空，调用接口时才校验
 func NewSolisSDK(creds Credentials, opts ...Option) (*SolisSDK, error) {
-	if err := creds.Validate(); err != nil {
-		return nil, err
-	}
-
 	sdk := &SolisSDK{
 		creds:             creds,
 		client:            req.C().SetBaseURL(creds.baseURL()).SetTimeout(30 * time.Second),
@@ -124,24 +122,30 @@ func NewSolisSDK(creds Credentials, opts ...Option) (*SolisSDK, error) {
 		now:               time.Now,
 	}
 
-	if sdk.client == nil {
-		return nil, errors.New("[GinLong]: HTTP客户端为空")
-	}
-
 	for _, opt := range opts {
 		opt(sdk)
 	}
 	return sdk, nil
 }
 
-// SolisSDK 返回底层 HTTP 客户端
+// Client 返回底层 HTTP 客户端
 func (c *SolisSDK) Client() *req.Client { return c.client }
 
 // Credentials 返回凭证副本
-func (c *SolisSDK) Credentials() Credentials { return c.creds }
+func (c *SolisSDK) Credentials() Credentials {
+	c.credsMu.RLock()
+	defer c.credsMu.RUnlock()
+	return c.creds
+}
 
-// SetCredentials 后续补充凭证
-func (c *SolisSDK) SetCredentials(creds Credentials) { c.creds = creds }
+// SetCredentials 运行期更换凭证
+func (c *SolisSDK) SetCredentials(creds Credentials) {
+	c.credsMu.Lock()
+	c.creds = creds
+	c.credsMu.Unlock()
+
+	c.client.SetBaseURL(creds.baseURL())
+}
 
 // ContentMD5 计算 Content-MD5：base64(md5(body))
 func ContentMD5(body []byte) string {
@@ -163,7 +167,8 @@ func Authorization(apiID, sign string) string {
 
 // call 发送一次业务请求
 func (c *SolisSDK) call(path string, body any) (*Envelope, error) {
-	if err := c.creds.Validate(); err != nil {
+	creds := c.Credentials()
+	if err := creds.Validate(); err != nil {
 		return nil, ErrMissingCredentials
 	}
 
@@ -174,13 +179,13 @@ func (c *SolisSDK) call(path string, body any) (*Envelope, error) {
 
 	contentMD5 := ContentMD5(payload)
 	date := c.now().UTC().Format(TimeLayout)
-	sign := Sign(c.creds.APISecret, contentMD5, c.signContentType, date, path)
+	sign := Sign(creds.APISecret, contentMD5, c.signContentType, date, path)
 
 	resp, err := c.client.R().
 		SetHeader("Content-Type", c.headerContentType).
 		SetHeader("Content-MD5", contentMD5).
 		SetHeader("Date", date).
-		SetHeader("Authorization", Authorization(strings.TrimSpace(c.creds.APIID), sign)).
+		SetHeader("Authorization", Authorization(strings.TrimSpace(creds.APIID), sign)).
 		SetBodyBytes(payload).
 		Post(path)
 	if err != nil {
@@ -188,7 +193,7 @@ func (c *SolisSDK) call(path string, body any) (*Envelope, error) {
 	}
 
 	raw := resp.Bytes()
-	c.logf("[Ginlong] %s <= %d %s", path, resp.StatusCode, string(raw))
+	c.logf("[Ginlong] %s <= %d", path, resp.StatusCode)
 
 	var env Envelope
 	if err := json.Unmarshal(raw, &env); err != nil {

@@ -1,11 +1,13 @@
 // 锦浪云平台 API 调用示例。
-// 凭证留空，测试时自行填写 APIID / APISecret（锦浪云 WEB 端「服务 - API 管理」获取）。
+// 凭证从环境变量读取：PS_GINLONG_APPID（KeyID）与 PS_GINLONG_APPSECRET（KeySecret），
+// 可在锦浪云 WEB 端「服务 - API 管理」获取。
 package main
 
 import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"ps-sdk/sdk/ginlong"
@@ -14,15 +16,14 @@ import (
 func main() {
 	sdk, err := ginlong.NewSolisSDK(
 		ginlong.Credentials{
-			APIID:     "1300386381676524935",              // 待填：KeyID
-			APISecret: "ab70d2d7e8584ca69aca0fa05b6df33a", // 待填：KeySecret
+			APIID:     os.Getenv("PS_GINLONG_APPID"),
+			APISecret: os.Getenv("PS_GINLONG_APPSECRET"),
 		},
 		ginlong.WithTimeout(30*time.Second),
 		ginlong.WithDebugf(log.Printf),
 	)
-
 	if err != nil {
-		panic(err)
+		log.Fatal(err)
 	}
 
 	// 1. 账号下电站列表

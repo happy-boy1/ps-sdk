@@ -24,11 +24,11 @@ func (c Code) IsError() bool {
 	return s != "" && s != "null" && s != CodeOK
 }
 
-// base 供内部接口断言使用
-func (r *Response) base() *Response { return r }
-
-// responder 内嵌 Response 的结果结构体自动满足
-type responder interface{ base() *Response }
+// envelope 一次响应的原始报文与已解析的公共字段
+type envelope struct {
+	raw json.RawMessage
+	env Response
+}
 
 // Code 兼容 字符串 / 数值 / null 的信息码
 func (c *Code) UnmarshalJSON(b []byte) error {

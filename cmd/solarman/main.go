@@ -1,11 +1,16 @@
 // SolarMan（小麦智电 / 小麦商家版）开放平台调用示例。
-// 凭证留空，测试时自行填写 AppID / AppSecret 与登录账号。
+// 凭证从环境变量读取，避免把账号密码写进代码：
+//
+//	PS_SOLARMAN_APPID / PS_SOLARMAN_APPSECRET / PS_SOLARMAN_ACCOUNT
+//	PS_SOLARMAN_COUNTRYCODE / PS_SOLARMAN_PASSWORD / PS_SOLARMAN_ORGID
 package main
 
 import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"time"
 
 	"ps-sdk/sdk/solarman"
@@ -14,19 +19,20 @@ import (
 func main() {
 	sdk, err := solarman.NewSolarmanSDK(
 		solarman.Credentials{
-			AppID:       "2024071755661944",
-			AppSecret:   "916c65304351bed64942e3de056289d1",
-			Email:       "",
-			Mobile:      "13092743221",
-			CountryCode: "86",
-			UserName:    "",
-			Password:    "20010923wsljj..",
-			OrgID:       1574,
+			AppID:       os.Getenv("PS_SOLARMAN_APPID"),
+			AppSecret:   os.Getenv("PS_SOLARMAN_APPSECRET"),
+			Mobile:      os.Getenv("PS_SOLARMAN_ACCOUNT"),
+			CountryCode: os.Getenv("PS_SOLARMAN_COUNTRYCODE"),
+			Password:    os.Getenv("PS_SOLARMAN_PASSWORD"),
+			OrgID:       parseInt64(os.Getenv("PS_SOLARMAN_ORGID")),
 		},
 		solarman.WithLanguage(solarman.LangZh),
 		solarman.WithTimeout(30*time.Second),
 		solarman.WithDebugf(log.Printf),
 	)
+	if err != nil {
+		fatal(err)
+	}
 
 	// 1. 获取 Token（也可不显式调用，首次请求会自动获取）
 	res, err := sdk.AcquireToken(solarman.TokenRequest{})
@@ -55,7 +61,7 @@ func main() {
 	fmt.Printf("共 %d 个电站\n", stations.Total)
 	for _, s := range stations.StationList {
 		fmt.Printf("  %d %s %s %.2fkW %s %s\n",
-			s.ID.Int(), s.Name, s.LocationAddress,
+			stationID(s.ID), s.Name, s.LocationAddress,
 			s.InstalledCapacity.Float(), s.Type, s.NetworkStatus)
 	}
 	if len(stations.StationList) == 0 {
@@ -64,7 +70,7 @@ func main() {
 	station := stations.StationList[0]
 
 	// 4. 电站实时数据
-	rt, err := sdk.StationRealTime(solarman.StationRealTimeRequest{StationID: station.ID})
+	rt, err := sdk.StationRealTime(solarman.StationRealTimeRequest{StationID: stationID(station.ID)})
 	if err != nil {
 		fatal(err)
 	}
@@ -74,7 +80,7 @@ func main() {
 	// 5. 电站下的设备列表
 	devices, err := sdk.StationDeviceList(solarman.StationDeviceListRequest{
 		PageRequest: solarman.PageRequest{Page: 1, Size: 50},
-		StationID:   station.ID,
+		StationID:   stationID(station.ID),
 	})
 	if err != nil {
 		fatal(err)
@@ -129,7 +135,7 @@ func main() {
 	// 9. 电站报警列表
 	alerts, err := sdk.StationAlert(solarman.StationAlertRequest{
 		PageRequest: solarman.PageRequest{Page: 1, Size: 20},
-		StationID:   station.ID,
+		StationID:   stationID(station.ID),
 		StartTime:   time.Now().AddDate(0, 0, -30).Format("2006-01-02"),
 		EndTime:     time.Now().Format("2006-01-02"),
 	})
@@ -140,7 +146,7 @@ func main() {
 	}
 
 	// 10. 电站实时天气
-	if w, err := sdk.StationWeather(solarman.StationWeatherRequest{StationID: station.ID}); err != nil {
+	if w, err := sdk.StationWeather(solarman.StationWeatherRequest{StationID: stationID(station.ID)}); err != nil {
 		log.Printf("天气: %v", err)
 	} else if v, ok := w.Raw["temperature"]; ok {
 		fmt.Printf("电站所在地温度: %v\n", v)
@@ -167,7 +173,26 @@ func main() {
 
 	// 14. 写操作（会变更账号数据，按需打开）
 	// _, err = sdk.StationCreate(solarman.StationCreateRequest{...})
-	// _, err = sdk.DeviceRegister(solarman.DeviceRegisterRequest{StationID: station.ID, DeviceSN: "xxx", IsAuto: true})
+	// _, err = sdk.DeviceRegister(solarman.DeviceRegisterRequest{StationID: stationID(station.ID), DeviceSN: "xxx", IsAuto: true})
+}
+
+// stationID 把电站 ID 从响应里的字符串形态转成请求需要的数值形态。
+// 4.4 的 id 字段类型不固定，SDK 用 Str 兜底，发送请求时需显式转换
+func stationID(id solarman.Str) solarman.Int64 {
+	v, err := strconv.ParseInt(id.String(), 10, 64)
+	if err != nil {
+		log.Fatalf("电站 ID %q 无法解析为数值: %v", id.String(), err)
+	}
+	return solarman.Int64(v)
+}
+
+// parseInt64 宽松解析整数，空值或非法值返回 0
+func parseInt64(s string) int64 {
+	v, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 func fatal(err error) {
