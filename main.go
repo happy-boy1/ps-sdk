@@ -1,9 +1,10 @@
 package main
 
 import (
-	"fmt"
 	"log"
+	"ps-sdk/pkg/tools"
 	"ps-sdk/sdk/sungrow"
+	"time"
 )
 
 func main() {
@@ -16,6 +17,11 @@ func main() {
 		},
 		sungrow.WithDevMode(false),
 		sungrow.WithDebugf(log.Printf),
+		sungrow.WithAccessToken(
+			"53753_sfxfqg4pp9g4xn5f2tunw5ytmry789sv658jk9z2y3gytt7kb5iyhb9ngqyitj6zmxw39qymh1in54n7ysu2hj1hvmna0cn8iwuepp7s3vqqa9vpn1v40exx7s6vkre4",
+			"",
+			time.Duration(24)*time.Hour,
+		),
 	)
 
 	if err != nil {
@@ -33,7 +39,32 @@ func main() {
 		panic(err)
 	}
 
-	for _, ps := range pwls.PageList {
-		fmt.Println(ps.PsName)
+	ps := pwls.PageList[1]
+
+	devs, err := sdk.GetDeviceListByPsID(
+		sungrow.DeviceListByPsIDRequest{
+			PageRequest: sungrow.PageRequest{
+				CurPage: 1,
+				Size:    100,
+			},
+			PsID: ps.PsId.String(),
+		},
+	)
+	if err != nil {
+		panic(err)
 	}
+
+	dev := devs.PageList[0]
+
+	rtd, err := sdk.GetDeviceRealTimeData(
+		sungrow.DeviceRtdRequest{
+			PsKeyList:   []string{dev.PsKey},
+			PointIDList: []string{"1"},
+			DeviceType:  dev.DeviceType,
+		},
+	)
+	if err != nil {
+		panic(err)
+	}
+	tools.WriteJsonFile("test.json", rtd)
 }

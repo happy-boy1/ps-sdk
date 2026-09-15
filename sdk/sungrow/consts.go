@@ -278,3 +278,54 @@ func (t DevTypeID) String() string {
 	}
 	return "未知类型设备"
 }
+
+type PsType uint8
+
+const (
+	PsTypeGround             PsType = 1
+	PsTypeDistributedPV      PsType = 3
+	PsTypeResidentialPV      PsType = 4
+	PsTypeResidentialStorage PsType = 5
+	PsTypeVillage            PsType = 6
+	PsTypeDistributedStorage PsType = 7
+	PsTypePovertyRelief      PsType = 8
+	PsTypeWind               PsType = 9
+	PsTypeCommercialStorage  PsType = 12
+)
+
+var psTypeNames = map[PsType]string{
+	PsTypeGround:             "地面电站",
+	PsTypeDistributedPV:      "分布式光伏",
+	PsTypeResidentialPV:      "户用光伏",
+	PsTypeResidentialStorage: "户用储能",
+	PsTypeVillage:            "村级电站",
+	PsTypeDistributedStorage: "分布式储能",
+	PsTypePovertyRelief:      "扶贫电站",
+	PsTypeWind:               "风能电站",
+	PsTypeCommercialStorage:  "工商业储能",
+}
+
+func (t PsType) String() string {
+	if n, ok := psTypeNames[t]; ok {
+		return n
+	}
+	return "未知类型电站"
+}
+
+type PsOnlineStatus uint8
+
+const (
+	PsOnlineStatusOffline PsOnlineStatus = 0
+	PsOnlineStatusOnlie   PsOnlineStatus = 1
+)
+
+func (t PsOnlineStatus) String() string {
+	switch t {
+	case PsOnlineStatusOffline:
+		return "离线"
+	case PsOnlineStatusOnlie:
+		return "在线"
+	default:
+		return "未知状态"
+	}
+}

@@ -283,3 +283,7 @@ type Entity struct {
 	Unit  string `json:"unit"`
 	Value Str    `json:"value"`
 }
+
+func (e Entity) String() string {
+	return fmt.Sprintf("%s (%s)", e.Value, e.Unit)
+}

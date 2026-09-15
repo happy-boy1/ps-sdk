@@ -504,7 +504,7 @@ func decodeData(data json.RawMessage, out any) error {
 		return nil
 	}
 	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("[HuaWei] data 解析失败: %w", err)
+		return fmt.Errorf("[Sungrow] data 解析失败: %w", err)
 	}
 	return nil
 }
