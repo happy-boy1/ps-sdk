@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,13 @@ type loginError struct{ err error }
 
 func (e *loginError) Error() string { return e.err.Error() }
 func (e *loginError) Unwrap() error { return e.err }
+
+// tokenCarrier 需要注入 appkey 与 token 的请求体。
+// 业务接口的请求体都是「内嵌 Request 的结构体指针」，如 &PowerStationListRequest{}，
+// 由 callOnce 统一注入，接口方法内部不必再关心 token
+type tokenCarrier interface {
+	setAuth(appKey, token string)
+}
 
 type SungrowSDK struct {
 	creds  Credentials
@@ -124,6 +132,15 @@ func WithMaxAttempts(n int) Option {
 	return func(sdk *SungrowSDK) {
 		if n > 0 {
 			sdk.maxAttempts = n
+		}
+	}
+}
+
+// WithRetryBaseDelay 设置重试基础退避时长，默认 RetryBaseDelay
+func WithRetryBaseDelay(d time.Duration) Option {
+	return func(sdk *SungrowSDK) {
+		if d > 0 {
+			sdk.retryDelay = d
 		}
 	}
 }
@@ -213,6 +230,8 @@ type TokenResult struct {
 	CountryId         string `json:"country_id"`
 }
 
+// Login 获取 Token 并缓存。总是发起一次登录请求；
+// 业务接口调用无需显式登录，token 为空或失效时会自动获取（见 ensureToken）
 func (sdk *SungrowSDK) Login() (*TokenResult, error) {
 	sdk.loginMu.Lock()
 	defer sdk.loginMu.Unlock()
@@ -236,13 +255,23 @@ func (sdk *SungrowSDK) login() (*TokenResult, error) {
 	}
 
 	if out.Token == "" {
+		// 平台以 result_data.login_state 表达失败原因，token 为空即登录未成功
+		if state, ok := ParseLoginState(out.LoginState); ok && state != LoginStateOK {
+			return nil, fmt.Errorf("[Sungrow] %s 登录失败: login_state=%s (%s)",
+				PathLogin, strings.TrimSpace(out.LoginState), state)
+		}
 		return nil, fmt.Errorf("[Sungrow] %s: 调用成功，但是token为空值", PathLogin)
 	}
 
 	sdk.mu.Lock()
 	sdk.token = out.Token
 	sdk.expiry = time.Now().Add(TokenTTL)
+	if uid, err := strconv.ParseInt(strings.TrimSpace(out.UserId), 10, 64); err == nil {
+		sdk.uid = uid
+	}
 	sdk.mu.Unlock()
+
+	sdk.logf("[Sungrow] 登录成功，token 有效期至 %s", sdk.TokenExpiry().Format(time.RFC3339))
 
 	return &out, nil
 }
@@ -260,24 +289,46 @@ func (sdk *SungrowSDK) EnsureLogin() error {
 	return err
 }
 
-func (sdk *SungrowSDK) ensureToken() (string, error) {
+// cachedToken 返回尚未失效的缓存 token，失效提前量 TokenRefreshAhead
+func (sdk *SungrowSDK) cachedToken() (string, bool) {
 	sdk.mu.RLock()
-	token, expiry := sdk.token, sdk.expiry
-	sdk.mu.RUnlock()
+	defer sdk.mu.RUnlock()
 
-	if token != "" && time.Now().Before(expiry.Add(-TokenRefreshAhead)) {
+	if sdk.token == "" || !time.Now().Before(sdk.expiry.Add(-TokenRefreshAhead)) {
+		return "", false
+	}
+	return sdk.token, true
+}
+
+// ensureToken 返回可用 token：命中缓存直接复用，否则获取并缓存后再返回
+func (sdk *SungrowSDK) ensureToken() (string, error) {
+	if token, ok := sdk.cachedToken(); ok {
 		return token, nil
 	}
 
 	if !sdk.autoLogin {
-		if token != "" {
+		// 关闭自动登录时沿用已有 token，由服务端判定是否失效
+		if token := sdk.Token(); token != "" {
 			return token, nil
 		}
 
 		return "", ErrNotLoggedIn
 	}
 
-	if _, err := sdk.Login(); err != nil {
+	return sdk.loginShared()
+}
+
+// loginShared 串行化获取 Token：取到锁后二次确认缓存，
+// 避免并发请求重复登录（同账号重复登录可能使先前 token 失效）
+func (sdk *SungrowSDK) loginShared() (string, error) {
+	sdk.loginMu.Lock()
+	defer sdk.loginMu.Unlock()
+
+	if token, ok := sdk.cachedToken(); ok {
+		return token, nil
+	}
+
+	if _, err := sdk.login(); err != nil {
 		return "", err
 	}
 
@@ -293,7 +344,7 @@ func (sdk *SungrowSDK) invalidateToken() {
 
 func (sdk *SungrowSDK) decode(path string, resp *req.Response) (*Envelope, error) {
 	raw := resp.Bytes()
-	sdk.logf("[Sungrow %s <= %d]", path, resp.StatusCode)
+	sdk.logf("[Sungrow] %s <= %d", path, resp.StatusCode)
 
 	var wire Envelope
 
@@ -310,8 +361,14 @@ func (sdk *SungrowSDK) decode(path string, resp *req.Response) (*Envelope, error
 
 func (sdk *SungrowSDK) backoff(attempt int, lastErr error) time.Duration {
 	var apiErr *APIError
-	if errors.As(lastErr, &apiErr) && apiErr.ResultCode == ResultCodeCallTooFrequently {
-		return time.Minute
+	if errors.As(lastErr, &apiErr) {
+		switch apiErr.ResultCode {
+		case ResultCodeCallTooFrequently:
+			return time.Minute
+		case ResultCodeErTokenLoginInvalid:
+			// token 失效已丢弃缓存并重新获取，无需退避
+			return 0
+		}
 	}
 	base := sdk.retryDelay
 	if base <= 0 {
@@ -324,7 +381,24 @@ func (sdk *SungrowSDK) backoff(attempt int, lastErr error) time.Duration {
 	return d
 }
 
+// callOnce 发送单次请求。
+// 除登录接口外，请求体（内嵌 Request 的结构体指针）会在发送前统一注入 appkey 与 token；
+// token 为空或已失效时先获取并缓存，再发起本次调用
 func (sdk *SungrowSDK) callOnce(path string, body any) (*Envelope, error) {
+	if body != nil && path != PathLogin {
+		carrier, ok := body.(tokenCarrier)
+		if !ok {
+			return nil, fmt.Errorf("[Sungrow] %s 请求体需为内嵌 Request 的结构体指针（如 &Req{}），当前类型 %T", path, body)
+		}
+
+		token, err := sdk.ensureToken()
+		if err != nil {
+			// 标记为登录失败：连续输错密码会锁定账户，不重试
+			return nil, &loginError{err: err}
+		}
+
+		carrier.setAuth(sdk.creds.AppID, token)
+	}
 
 	r := sdk.client.R().
 		SetHeader(HeaderXAccessKey, sdk.creds.AppSecret).
@@ -381,7 +455,9 @@ func (sdk *SungrowSDK) call(path string, body any) (*Envelope, error) {
 		apiErr := newAPIError(path, env)
 		switch {
 		case apiErr.ResultCode == ResultCodeErTokenLoginInvalid && sdk.autoLogin:
-			// sdk.invalidateToken() // token 失效，重新登录后重试
+			// token 失效：丢弃缓存，下次尝试会重新获取 token 再调用
+			sdk.invalidateToken()
+			sdk.logf("[Sungrow] %s token 失效(%s)，重新获取后重试", path, apiErr.ResultCode)
 			lastErr = apiErr
 		case apiErr.Retryable():
 			lastErr = apiErr

@@ -16,6 +16,15 @@ type Request struct {
 	Nonce       string          `json:"nonce,omitempty"`
 }
 
+// setAuth 由 SungrowSDK.callOnce 在发送前调用，注入 appkey 与当前有效 token。
+// 调用方显式指定 appkey 时保留其值，token 始终以 SDK 缓存的值为准。
+func (r *Request) setAuth(appKey, token string) {
+	if strings.TrimSpace(r.AppKey) == "" {
+		r.AppKey = appKey
+	}
+	r.Token = token
+}
+
 type Envelope struct {
 	ReqSerialNum string          `json:"req_serial_num"`
 	ResultCode   ResultCode      `json:"result_code"`

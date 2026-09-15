@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"ps-sdk/sdk/sungrow"
 )
 
@@ -12,11 +13,19 @@ func main() {
 			UserAccount:  "js",
 			UserPassword: "fxdlyw12.",
 		},
-		sungrow.WithDevMode(true),
+		sungrow.WithDevMode(false),
+		sungrow.WithDebugf(log.Printf),
 	)
+
 	if err != nil {
 		panic(err)
 	}
 
-	sdk.Login()
+	sdk.GetPowerStationList(sungrow.PowerStationListRequest{
+		PageRequest: sungrow.PageRequest{
+			CurPage: 1,
+			Size:    100,
+		},
+	})
+
 }
