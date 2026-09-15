@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"ps-sdk/sdk/sungrow"
 )
@@ -21,11 +22,18 @@ func main() {
 		panic(err)
 	}
 
-	sdk.GetPowerStationList(sungrow.PowerStationListRequest{
+	pwls, err := sdk.GetPowerStationList(sungrow.PowerStationListRequest{
 		PageRequest: sungrow.PageRequest{
 			CurPage: 1,
 			Size:    100,
 		},
 	})
 
+	if err != nil {
+		panic(err)
+	}
+
+	for _, ps := range pwls.PageList {
+		fmt.Println(ps.PsName)
+	}
 }

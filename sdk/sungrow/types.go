@@ -278,3 +278,8 @@ func (e *IntEnum) UnmarshalJSON(b []byte) error {
 }
 
 func (e IntEnum) MarshalJSON() ([]byte, error) { return json.Marshal(int(e)) }
+
+type Entity struct {
+	Unit  string `json:"unit"`
+	Value Str    `json:"value"`
+}
