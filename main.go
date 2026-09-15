@@ -5,9 +5,9 @@
 //	go run . -platform solarman        # 只同步指定平台
 //	go run . -platform all             # 同步所有已配置凭据的平台
 //	go run . -list                     # 只读库，打印已同步的数据
+//	go run . -config ./config.toml     # 指定配置文件
 //
-// 平台凭据优先取环境变量（PS_<平台短码大写>_APPID 等），
-// 其次取数据库 platform_auth 表。
+// 配置优先级由低到高：config.toml → 数据库 platform_auth 表（app_key/app_secret）→ 环境变量。
 package main
 
 import (
@@ -15,30 +15,34 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
+	"ps-sdk/pkg/config"
 	"ps-sdk/pkg/database"
 	"ps-sdk/service"
 )
 
 func main() {
 	var (
-		platform = flag.String("platform", "all", "平台短码：solarman|sungrow|ginlong|huawei|all")
-		list     = flag.Bool("list", false, "只读取并打印库内数据，不访问平台")
-		seeds    = flag.Bool("seed", false, "只写入平台/设备类型基础数据")
-		timeout  = flag.Duration("timeout", 30*time.Second, "单次请求超时")
-		debug    = flag.Bool("debug", false, "打印请求日志")
-		devMode  = flag.Bool("dev", false, "打印完整请求/响应报文")
+		platform   = flag.String("platform", "all", "平台短码：solarman|sungrow|ginlong|huawei|all")
+		configPath = flag.String("config", "", "配置文件路径，缺省依次查找 PS_CONFIG、./config.toml、./pkg/config/config.toml")
+		list       = flag.Bool("list", false, "只读取并打印库内数据，不访问平台")
+		seeds      = flag.Bool("seed", false, "只写入平台/设备类型基础数据")
 	)
 	flag.Parse()
 
-	if err := run(*platform, *list, *seeds, *timeout, *debug, *devMode); err != nil {
+	if err := run(*platform, *configPath, *list, *seeds); err != nil {
 		log.Fatalf("[ps-sdk] %v", err)
 	}
 }
 
-func run(platform string, list, seeds bool, timeout time.Duration, debug, devMode bool) error {
-	if err := database.Init(); err != nil {
+func run(platform, configPath string, list, seeds bool) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	log.Printf("[ps-sdk] 配置文件: %s", cfg.Path)
+
+	if err := database.Init(cfg.Database); err != nil {
 		return err
 	}
 	defer func() {
@@ -47,7 +51,7 @@ func run(platform string, list, seeds bool, timeout time.Duration, debug, devMod
 		}
 	}()
 
-	if err := service.Init(database.DB); err != nil {
+	if err := service.InitWith(database.DB, cfg); err != nil {
 		return fmt.Errorf("写入基础数据失败: %w", err)
 	}
 	if seeds {
@@ -55,11 +59,10 @@ func run(platform string, list, seeds bool, timeout time.Duration, debug, devMod
 		return nil
 	}
 
-	opts := service.Options{Timeout: timeout, Debug: debug, DevMode: devMode}
 	if list {
 		return printStored(platform)
 	}
-	return syncPlatforms(platform, opts)
+	return syncPlatforms(platform, service.OptionsFrom(cfg))
 }
 
 // syncPlatforms 同步指定平台，all 表示遍历全部平台
@@ -68,7 +71,7 @@ func syncPlatforms(platform string, opts service.Options) error {
 		results, err := service.SyncAll(opts)
 		for _, result := range results {
 			fmt.Println(result)
-			printErrors(result)
+			printIssues(result)
 		}
 		return err
 	}
@@ -79,7 +82,7 @@ func syncPlatforms(platform string, opts service.Options) error {
 	}
 	result, err := client.Sync()
 	fmt.Println(result)
-	printErrors(result)
+	printIssues(result)
 	return err
 }
 
@@ -123,8 +126,8 @@ func printStored(platform string) error {
 	return nil
 }
 
-// printErrors 打印同步过程中的单项失败与告警
-func printErrors(result *service.SyncResult) {
+// printIssues 打印同步过程中的告警与失败明细
+func printIssues(result *service.SyncResult) {
 	for _, err := range result.Warnings {
 		log.Printf("[ps-sdk][告警] %v", err)
 	}

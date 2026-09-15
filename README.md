@@ -10,19 +10,28 @@
 | 阳光云 Sungrow iSolarCloud | `sdk/sungrow` | Sungrow OpenApi 文档 | appkey + x-access-key + Token |
 
 `service` 包在四个 SDK 之上提供统一的数据接入层：把各平台的电站与设备归一后写入数据库。
+运行参数与平台凭据由 `pkg/config` 从 TOML 文件加载。
 
 ## 目录结构
 
 ```
+pkg/config/               配置加载（TOML + 环境变量覆盖）
+  config.go               配置结构、加载、平台凭据（实现 service.ConfigProvider）
+  duration.go             "30s" 形式的时长字段
+  env.go                  PS_* 环境变量覆盖
+  config.example.toml     配置模板（随代码分发，go:embed 进二进制）
+  config.toml             本机实际配置，含口令，已加入 .gitignore
+
 service/                  统一接入层（平台适配、字段归一、落库、同步编排）
   doc.go                  包说明
   platform.go             平台常量与元信息（ID / 短码 / 默认地址）
   devicetype.go           统一设备类型目录与各平台类型编码映射
   status.go               电站与设备状态枚举
-  errors.go               统一错误、日志出口、部分成功错误
-  adapter.go              适配器接口与平台构造器注册表
-  factory.go              客户端构造与 ClientMethod 统一能力
-  resolve.go              凭据解析（环境变量优先，其次 platform_auth 表）
+  errors.go               统一错误、日志出口、部分成功错误、运行参数
+  adapter.go              适配器接口、构造器注册表、请求节流
+  factory.go              平台客户端构造函数
+  wire.go                 配置对接（OptionsFrom / OpenFromConfig）
+  resolve.go              凭据解析（配置文件 → 数据库 → 环境变量）
   store.go                基础数据写入与电站/设备 UPSERT
   sync.go                 同步编排、SyncAll、Client
   syncresult.go           同步结果
@@ -30,7 +39,7 @@ service/                  统一接入层（平台适配、字段归一、落库
   *_client.go             四个平台的适配器实现
   *_test.go               单元测试
 
-pkg/database/sql.go       数据库连接（环境变量可覆盖，返回错误而非 panic）
+pkg/database/sql.go       数据库连接（按配置连接，返回错误而非 panic）
 pkg/tools/jsonfile.go     JSON 文件读写
 
 sdk/huawei/
@@ -82,6 +91,109 @@ cmd/solarman/main.go      SolarMan SDK 调用示例
 
 ---
 
+# 配置（pkg/config）
+
+## 三层优先级
+
+```
+代码默认值  <  config.toml  <  环境变量（PS_ 前缀）
+```
+
+- **平台凭据**：`app_id`（AppKey）与 `app_secret`（AppSecret）**以数据库 `platform_auth` 表为准**；
+  接口地址、登录账号、密码、商家 ID 等数据库未建模的信息由 `config.toml` 提供；
+  环境变量可覆盖任意字段，便于临时切换。
+- 数据库不可用或缺行时，凭据退化为「config.toml + 环境变量」，不会中断同步。
+
+## config.toml
+
+模板见 `pkg/config/config.example.toml`，复制为 `pkg/config/config.toml` 后填写。
+`config.toml` 含账号口令，已加入 `.gitignore`。
+
+```toml
+[http]
+timeout = "30s"        # 单次请求超时
+max_attempts = 3       # 含首调在内的最大尝试次数
+retry_delay = "2s"     # 重试基础退避
+debug = false          # 打印请求日志
+dev_mode = false       # 打印完整请求/响应报文
+
+[sync]
+concurrency = 1        # 同步设备时的并发电站数（被限流时会自动串行退避）
+
+[database]
+host = "127.0.0.1"
+port = 3306
+user = "root"
+password = ""
+name = "rtm"
+# dsn 非空时直接使用，忽略其余分项
+
+[platform.solarman]
+api_url = "https://api.solarmanpv.com"
+account = ""           # 登录身份三选一：account / email / user_name
+country_code = "86"
+password = ""
+org_id = 0             # 商家版填商家 ID
+
+[platform.sungrow]
+api_url = "https://gateway.isolarcloud.com"
+account = ""           # 登录账号（appkey 不能当账号用）
+password = ""
+
+[platform.ginlong]
+api_url = "https://api.ginlong.com:13333"
+
+[platform.huawei]
+api_url = "https://intl.fusionsolar.huawei.com"
+account = ""           # API 账户名（app_id 亦可）
+password = ""          # API 账户密码（app_secret 亦可）
+```
+
+加载顺序：`-config` 参数 → `PS_CONFIG` 环境变量 → `./config.toml` → `./pkg/config/config.toml`；
+都不存在时按模板在工作目录写出 `config.toml` 并继续使用默认值。
+
+## 环境变量
+
+| 用途 | 变量 |
+| --- | --- |
+| 配置文件路径 | `PS_CONFIG` |
+| 数据库 | `PS_DB_DSN` / `PS_DB_HOST` / `PS_DB_PORT` / `PS_DB_USER` / `PS_DB_PASSWORD` / `PS_DB_NAME` / `PS_DB_CHARSET` / `PS_DB_MAX_IDLE` / `PS_DB_MAX_OPEN` / `PS_DB_CONN_MAX_LIFE` |
+| 请求与同步 | `PS_HTTP_TIMEOUT` / `PS_MAX_ATTEMPTS` / `PS_RETRY_DELAY` / `PS_DEBUG` / `PS_DEV_MODE` / `PS_SYNC_CONCURRENCY` |
+| solarman | `PS_SOLARMAN_APPID` / `PS_SOLARMAN_APPSECRET` / `PS_SOLARMAN_ACCOUNT` / `PS_SOLARMAN_PASSWORD` / `PS_SOLARMAN_ORGID` / `PS_SOLARMAN_COUNTRYCODE` / `PS_SOLARMAN_EMAIL` / `PS_SOLARMAN_USERNAME` |
+| sungrow | `PS_SUNGROW_APPID` / `PS_SUNGROW_APPSECRET` / `PS_SUNGROW_ACCOUNT` / `PS_SUNGROW_PASSWORD` |
+| ginlong | `PS_GINLONG_APPID` / `PS_GINLONG_APPSECRET` |
+| huawei | `PS_HUAWEI_APPID`（API 账户名）/ `PS_HUAWEI_PASSWORD` |
+| 通用 | `PS_<平台>_APIURL` 覆盖接口地址，`PS_<平台>_APP_ID` 等带下划线写法同样识别 |
+
+## 代码中的用法
+
+```go
+cfg, err := config.Load("")            // 加载配置（含环境变量覆盖）
+if err != nil {
+    log.Fatal(err)
+}
+if err := database.Init(cfg.Database); err != nil {
+    log.Fatal(err)
+}
+defer database.Close()
+
+// 注入配置：平台凭据与运行参数都从 cfg 取
+if err := service.InitWith(database.DB, cfg); err != nil {
+    log.Fatal(err)
+}
+
+client, err := service.PlatformClient("solarman", service.OptionsFrom(cfg))
+if err != nil {
+    log.Fatal(err)
+}
+result, err := client.Sync()
+log.Println(result)
+```
+
+不使用配置文件时用 `service.Init(database.DB)`，凭据只依赖环境变量与数据库。
+
+---
+
 # service 统一接入层
 
 ## 能力
@@ -101,24 +213,26 @@ package main
 import (
     "log"
 
+    "ps-sdk/pkg/config"
     "ps-sdk/pkg/database"
     "ps-sdk/service"
 )
 
 func main() {
-    if err := database.Init(); err != nil { // 连接参数可用 PS_DB_* 环境变量覆盖
+    cfg, err := config.Load("") // 配置见「配置（pkg/config）」章节
+    if err != nil {
+        log.Fatal(err)
+    }
+    if err := database.Init(cfg.Database); err != nil {
         log.Fatal(err)
     }
     defer database.Close()
 
-    if err := service.Init(database.DB); err != nil { // 自动补表 + 写入平台/设备类型基础数据
+    if err := service.InitWith(database.DB, cfg); err != nil { // 自动补表 + 写入平台/设备类型基础数据
         log.Fatal(err)
     }
 
-    client, err := service.PlatformClient("solarman", service.Options{
-        Timeout: 30 * time.Second,
-        Debug:   true,
-    })
+    client, err := service.PlatformClient("solarman", service.OptionsFrom(cfg))
     if err != nil {
         log.Fatal(err)
     }
@@ -138,6 +252,7 @@ go run . -platform solarman     # 同步指定平台
 go run . -platform all          # 同步全部已配置凭据的平台
 go run . -list                  # 只读库，打印已同步的电站与设备
 go run . -seed                  # 只写入平台/设备类型基础数据
+go run . -config ./my.toml      # 指定配置文件
 go run . -platform ginlong -debug
 ```
 
@@ -145,11 +260,13 @@ go run . -platform ginlong -debug
 
 | 方法 | 说明 |
 | --- | --- |
-| `Init(db)` | 注入数据库句柄，自动补表并写入平台与设备类型基础数据 |
+| `Init(db)` | 只注入数据库句柄，自动补表并写入基础数据 |
+| `InitWith(db, cfg)` | 额外注入配置来源（`*config.Config`），平台凭据从中读取 |
 | `Seed()` | 仅写入基础数据，可重复调用 |
 | `PlatformClient(code, opts)` | 按平台短码创建客户端 |
+| `OptionsFrom(cfg)` | 从配置来源取运行参数 |
 | `NewAdapter(cred, opts)` | 用显式凭据创建适配器 |
-| `NewClient(adapter)` | 用自定义适配器创建客户端，便于测试 |
+| `NewClient(adapter, opts)` | 用自定义适配器创建客户端，便于测试 |
 | `(*Client).Sync()` | 拉取电站与设备并落库，返回 `*SyncResult` |
 | `(*Client).SyncStations()` | 只拉取电站并落库 |
 | `(*Client).SyncDevices(stationID)` | 只拉取指定电站的设备并落库 |
@@ -160,21 +277,8 @@ go run . -platform ginlong -debug
 
 平台短码：`solarman`、`sungrow`、`ginlong`、`huawei`（即 `service.CodeXxx`）。
 
-## 凭据
-
-凭据优先取环境变量，其次取 `platform_auth` 表。命名规则 `PS_<平台短码大写>_<字段>`：
-
-| 平台 | 环境变量 |
-| --- | --- |
-| solarman | `PS_SOLARMAN_APPID`、`PS_SOLARMAN_APPSECRET`、`PS_SOLARMAN_ACCOUNT`、`PS_SOLARMAN_PASSWORD`、`PS_SOLARMAN_ORGID`、`PS_SOLARMAN_COUNTRYCODE` |
-| sungrow | `PS_SUNGROW_APPID`、`PS_SUNGROW_APPSECRET`、`PS_SUNGROW_ACCOUNT`、`PS_SUNGROW_PASSWORD` |
-| ginlong | `PS_GINLONG_APPID`、`PS_GINLONG_APPSECRET` |
-| huawei | `PS_HUAWEI_APPID`（API 账户名）、`PS_HUAWEI_PASSWORD` |
-| 通用 | `PS_<平台>_APIURL` 覆盖接口地址；`PS_DB_DSN` / `PS_DB_HOST` / `PS_DB_PORT` / `PS_DB_USER` / `PS_DB_PASSWORD` / `PS_DB_NAME` 覆盖数据库连接 |
-
-`PS_SUNGROW_ACCOUNT` 是阳光云的登录账号（appkey 只是应用标识，不能当账号用）；
-华为的 API 账户名与密码分别放在 `app_id` / `app_secret` 两列。
-账号类字段（`ACCOUNT` / `PASSWORD`）没有对应的数据表列，必须用环境变量提供。
+`SyncResult` 区分两类问题：`Errors` 是电站或设备落库失败等硬失败，`Warnings` 是
+「设备族接口无权限」这类不影响其余数据的告警，两者都会在命令行输出。
 
 ## 设备类型归一
 
@@ -196,6 +300,9 @@ go run . -platform ginlong -debug
   该情况计入 `SyncResult.Warnings` 而非失败。
 - 华为设备列表需先取电站编号并按 100 个电站批量查询，电站列表不返回在线状态。
 - 阳光云设备列表按电站 `ps_id` 过滤，设备类型编码与文档标注的类型不一致（两种形态都兼容）。
+- 平台限流阈值多数未公开，`service` 对每个平台内置请求节流：请求按最小间隔串行发出，
+  被限流时自适应加倍退避（上限 5s），设备列表还会自动重试；因此把 `[sync] concurrency`
+  调大不会压垮平台，但增大到 4 以上通常收益有限。
 
 ---
 

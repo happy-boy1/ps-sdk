@@ -196,11 +196,15 @@ func TestParseHelpers(t *testing.T) {
 }
 
 func TestOptionsDefaults(t *testing.T) {
-	if got := (Options{}).defaults().Timeout; got != 30*time.Second {
+	if got := (Options{}).WithDefaults().Timeout; got != 30*time.Second {
 		t.Fatalf("默认超时 = %v", got)
 	}
-	if got := (Options{Timeout: time.Minute}).defaults().Timeout; got != time.Minute {
-		t.Fatalf("显式超时被覆盖: %v", got)
+	if got := (Options{}).WithDefaults().Concurrency; got != 1 {
+		t.Fatalf("默认并发 = %v", got)
+	}
+	opts := Options{Timeout: time.Minute, Concurrency: 3}.WithDefaults()
+	if opts.Timeout != time.Minute || opts.Concurrency != 3 {
+		t.Fatalf("显式参数被覆盖: %+v", opts)
 	}
 }
 

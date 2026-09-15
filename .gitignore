@@ -28,3 +28,8 @@ TestResults.xml
 .pylibs/
 .pylibs2/
 *.exe
+
+### 本地配置（含账号口令） ###
+config.toml
+pkg/config/config.toml
+!pkg/config/config.example.toml

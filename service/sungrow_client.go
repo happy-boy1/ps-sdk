@@ -10,6 +10,7 @@ import (
 
 // sungrowAdapter 阳光云（iSolarCloud）适配器
 type sungrowAdapter struct {
+	limitBackoff
 	sdk *sungrow.SungrowSDK
 }
 
@@ -61,8 +62,13 @@ func (a *sungrowAdapter) Platform() Platform {
 func (a *sungrowAdapter) ListPowerStations() ([]model.PowerStation, error) {
 	stations := make([]model.PowerStation, 0, stationPageSize)
 	for curPage := 1; ; curPage++ {
-		res, err := a.sdk.GetPowerStationList(sungrow.PowerStationListRequest{
-			PageRequest: sungrow.PageRequest{CurPage: curPage, Size: stationPageSize},
+		var res *sungrow.PowerStationList
+		err := a.throttle(isRateLimitError, func() error {
+			result, err := a.sdk.GetPowerStationList(sungrow.PowerStationListRequest{
+				PageRequest: sungrow.PageRequest{CurPage: curPage, Size: stationPageSize},
+			})
+			res = result
+			return err
 		})
 		if err != nil {
 			return nil, wrapErr(PlatformSungrow, CodeSungrow, "列出电站", err)
@@ -84,9 +90,14 @@ func (a *sungrowAdapter) ListPowerDevices(stationID uint64) ([]model.PowerDevice
 
 	devices := make([]model.PowerDevice, 0, devicePageSize)
 	for curPage := 1; ; curPage++ {
-		res, err := a.sdk.GetDeviceListByPsID(sungrow.DeviceListByPsIDRequest{
-			PageRequest: sungrow.PageRequest{CurPage: curPage, Size: devicePageSize},
-			PsID:        ps.StationIDOrigin,
+		var res *sungrow.DeviceList
+		err := a.throttleRetry(isRateLimitError, deviceListAttempts, func() error {
+			result, err := a.sdk.GetDeviceListByPsID(sungrow.DeviceListByPsIDRequest{
+				PageRequest: sungrow.PageRequest{CurPage: curPage, Size: devicePageSize},
+				PsID:        ps.StationIDOrigin,
+			})
+			res = result
+			return err
 		})
 		if err != nil {
 			return nil, wrapErr(PlatformSungrow, CodeSungrow, "列出设备", err)

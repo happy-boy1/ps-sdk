@@ -16,6 +16,7 @@ const (
 
 // solarmanAdapter SolarMan（小麦智电 / 小麦商家版）适配器
 type solarmanAdapter struct {
+	limitBackoff
 	sdk *solarman.SolarmanSDK
 }
 
@@ -33,16 +34,19 @@ func newSolarmanAdapter(cred Credential, opts Options) (Adapter, error) {
 		return nil, wrapErr(cred.PlatformID, CodeSolarman, "构造适配器", ErrCredentialMissing)
 	}
 
-	// SolarMan 登录身份三选一：优先手机号（需国家码），其次邮箱，最后用户名
-	account := strings.TrimSpace(cred.Account)
-	mobile, email, userName := "", "", ""
-	switch {
-	case strings.Contains(account, "@"):
-		email = account
-	case account != "" && isDigits(account):
-		mobile = account
-	default:
-		userName = account
+	// 登录身份：邮箱按 email 下发，纯数字按手机号下发（需国家码），其余按用户名
+	email := strings.TrimSpace(cred.Email)
+	mobile := strings.TrimSpace(cred.Mobile)
+	userName := strings.TrimSpace(cred.UserName)
+	if identity := cred.Identity(); identity != "" {
+		switch {
+		case strings.Contains(identity, "@"):
+			email = identity
+		case isDigits(identity):
+			mobile = identity
+		default:
+			userName = identity
+		}
 	}
 
 	sdk, err := solarman.NewSolarmanSDK(solarman.Credentials{
@@ -71,8 +75,13 @@ func (a *solarmanAdapter) Platform() Platform {
 func (a *solarmanAdapter) ListPowerStations() ([]model.PowerStation, error) {
 	stations := make([]model.PowerStation, 0, stationPageSize)
 	for page := 1; ; page++ {
-		res, err := a.sdk.StationList(solarman.StationListRequest{
-			PageRequest: solarman.PageRequest{Page: page, Size: stationPageSize},
+		var res *solarman.StationListResult
+		err := a.throttle(isRateLimitError, func() error {
+			result, err := a.sdk.StationList(solarman.StationListRequest{
+				PageRequest: solarman.PageRequest{Page: page, Size: stationPageSize},
+			})
+			res = result
+			return err
 		})
 		if err != nil {
 			return nil, wrapErr(PlatformSolarman, CodeSolarman, "列出电站", err)
@@ -94,9 +103,14 @@ func (a *solarmanAdapter) ListPowerDevices(stationID uint64) ([]model.PowerDevic
 
 	devices := make([]model.PowerDevice, 0, devicePageSize)
 	for page := 1; ; page++ {
-		res, err := a.sdk.StationDeviceList(solarman.StationDeviceListRequest{
-			PageRequest: solarman.PageRequest{Page: page, Size: devicePageSize},
-			StationID:   station,
+		var res *solarman.StationDeviceListResult
+		err := a.throttleRetry(isRateLimitError, deviceListAttempts, func() error {
+			result, err := a.sdk.StationDeviceList(solarman.StationDeviceListRequest{
+				PageRequest: solarman.PageRequest{Page: page, Size: devicePageSize},
+				StationID:   station,
+			})
+			res = result
+			return err
 		})
 		if err != nil {
 			return nil, wrapErr(PlatformSolarman, CodeSolarman, "列出设备", err)
@@ -137,7 +151,7 @@ func solarmanStation(item *solarman.StationListItem) *model.PowerStation {
 
 // solarmanDevice 转换为统一设备模型
 func solarmanDevice(item *solarman.StationDeviceItem, stationID uint64) *model.PowerDevice {
-	origin := firstNonEmpty(item.DeviceSN, formatInt64(item.DeviceID.Int()))
+	origin := firstNonEmpty(formatInt64(item.DeviceID.Int()), item.DeviceSN)
 	deviceType := resolveDeviceType(CodeSolarman, string(item.DeviceType))
 
 	device := newPowerDevice(PlatformSolarman, stationID, deviceType.ID,

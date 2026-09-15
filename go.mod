@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/imroc/req/v3 v3.61.0
+	github.com/pelletier/go-toml/v2 v2.4.3
 	gorm.io/driver/mysql v1.6.0
 	gorm.io/gorm v1.31.2
 )

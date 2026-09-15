@@ -70,19 +70,24 @@ var ErrPlatformUnknown = errors.New("未知平台")
 // Logf 服务层日志输出口，默认走标准库 log，可替换为自定义日志实现
 var Logf = log.Printf
 
-// Options 适配器可选项
+// Options 请求与同步参数
 type Options struct {
-	Timeout     time.Duration // 单次请求超时
+	Timeout     time.Duration // 单次请求超时，默认 30s
+	MaxAttempts int           // 含首调在内的最大尝试次数，0 表示用 SDK 默认值
+	RetryDelay  time.Duration // 重试基础退避，0 表示用 SDK 默认值
 	Debug       bool          // 打印请求日志
 	DevMode     bool          // 打印完整请求/响应报文
-	MaxAttempts int           // 最大尝试次数，0 表示使用 SDK 默认值
-	RetryDelay  time.Duration // 重试基础退避
+	Language    string        // 部分平台的接口语言，SolarMan 使用，默认 zh
+	Concurrency int           // 同步设备时的并发电站数，默认 1
 }
 
-// defaults 补齐零值，保证适配器构造时参数合法
-func (o Options) defaults() Options {
+// WithDefaults 补齐零值，保证适配器构造与同步时参数合法
+func (o Options) WithDefaults() Options {
 	if o.Timeout <= 0 {
 		o.Timeout = 30 * time.Second
+	}
+	if o.Concurrency < 1 {
+		o.Concurrency = 1
 	}
 	return o
 }

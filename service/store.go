@@ -16,8 +16,15 @@ var db *gorm.DB
 // ErrDatabaseNotReady 数据库未初始化
 var ErrDatabaseNotReady = errors.New("数据库未初始化，请先调用 service.Init")
 
-// Init 注入数据库句柄，自动补齐表结构并写入平台、设备类型基础数据，可重复调用
+// Init 注入数据库句柄，自动补齐表结构并写入平台、设备类型基础数据，可重复调用。
+// 配置文件由 InitWith 注入；不使用配置文件时，平台凭据完全依赖环境变量与数据库。
 func Init(database *gorm.DB) error {
+	return InitWith(database, nil)
+}
+
+// InitWith 注入数据库句柄与配置来源。
+// cfg 需实现 ConfigProvider（pkg/config.Config 已实现），为 nil 时只用环境变量。
+func InitWith(database *gorm.DB, cfg ConfigProvider) error {
 	if database == nil {
 		return ErrDatabaseNotReady
 	}
@@ -25,6 +32,7 @@ func Init(database *gorm.DB) error {
 		return err
 	}
 	db = database
+	provider = cfg
 	return Seed()
 }
 

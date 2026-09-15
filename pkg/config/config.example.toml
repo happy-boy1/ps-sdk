@@ -1,0 +1,55 @@
+# ps-sdk 运行配置模板
+#
+# 复制为 config.toml 后填写本机凭据；也可用 -config 指定任意路径。
+# 优先级：代码默认值 < config.toml < 环境变量（PS_ 前缀）。
+# 平台凭据中的 app_id / app_secret 以数据库 platform_auth 表为准
+# （数据库缺行时也可在此填写兜底），其余登录信息由本文件提供。
+
+[http]
+timeout = "30s"        # 单次请求超时，如 "30s"、"1m"
+max_attempts = 3       # 含首调在内的最大尝试次数
+retry_delay = "2s"     # 重试基础退避，指数增长，上限 30s
+debug = false          # 打印请求日志
+dev_mode = false       # 打印完整请求/响应报文
+
+[sync]
+concurrency = 1        # 同步设备时的并发电站数
+
+[database]
+host = "127.0.0.1"
+port = 3306
+user = "root"
+password = ""
+name = "rtm"
+charset = "utf8mb4"
+max_idle_conns = 12
+max_open_conns = 100
+conn_max_life = "1h"
+# dsn 非空时直接使用，忽略上面其余分项
+# dsn = "root:password@tcp(127.0.0.1:3306)/rtm?charset=utf8mb4&parseTime=True&loc=Local"
+
+# SolarMan 小麦智电 / 小麦商家版
+[platform.solarman]
+api_url = "https://api.solarmanpv.com"
+account = ""              # 登录身份三选一：account / email / user_name
+email = ""
+user_name = ""
+country_code = "86"       # 手机号登录时必填
+password = ""             # 明文密码，SDK 内部做 SHA256
+org_id = 0                # 商家版填商家 ID，C 端留 0
+
+# 阳光云 Sungrow iSolarCloud
+[platform.sungrow]
+api_url = "https://gateway.isolarcloud.com"
+account = ""              # 登录账号（appkey 不能当账号用）
+password = ""
+
+# 锦浪云 SolisCloud（app_id / app_secret 由数据库提供）
+[platform.ginlong]
+api_url = "https://api.ginlong.com:13333"
+
+# 华为 FusionSolar（app_id / app_secret 为 API 账户名与密码）
+[platform.huawei]
+api_url = "https://intl.fusionsolar.huawei.com"
+account = ""
+password = ""

@@ -13,6 +13,7 @@ const huaweiStationBatch = 100
 
 // huaweiAdapter 华为 FusionSolar 北向接口适配器
 type huaweiAdapter struct {
+	limitBackoff
 	sdk *huawei.FusionSolarSDK
 }
 
@@ -60,7 +61,12 @@ func (a *huaweiAdapter) Platform() Platform {
 func (a *huaweiAdapter) ListPowerStations() ([]model.PowerStation, error) {
 	stations := make([]model.PowerStation, 0, huaweiStationBatch)
 	for pageNo := 1; ; pageNo++ {
-		res, err := a.sdk.GetStationList(huawei.StationListRequest{PageNo: pageNo})
+		var res *huawei.StationListResult
+		err := a.throttle(isRateLimitError, func() error {
+			result, err := a.sdk.GetStationList(huawei.StationListRequest{PageNo: pageNo})
+			res = result
+			return err
+		})
 		if err != nil {
 			return nil, wrapErr(PlatformFusionSolar, CodeFusionSolar, "列出电站", err)
 		}
@@ -79,7 +85,12 @@ func (a *huaweiAdapter) ListPowerDevices(stationID uint64) ([]model.PowerDevice,
 		return nil, wrapErr(PlatformFusionSolar, CodeFusionSolar, "读取电站", err)
 	}
 
-	devices, err := a.sdk.GetDevList(huawei.DeviceListRequest{StationCodes: ps.StationIDOrigin})
+	var devices []huawei.Device
+	err = a.throttleRetry(isRateLimitError, deviceListAttempts, func() error {
+		result, err := a.sdk.GetDevList(huawei.DeviceListRequest{StationCodes: ps.StationIDOrigin})
+		devices = result
+		return err
+	})
 	if err != nil {
 		return nil, wrapErr(PlatformFusionSolar, CodeFusionSolar, "列出设备", err)
 	}
@@ -102,7 +113,8 @@ func huaweiStation(item *huawei.Station) *model.PowerStation {
 		Longitude:       item.Longitude.Float(),
 		Latitude:        item.Latitude.Float(),
 		GridConnectedAt: dateTime(item.GridConnectionDate),
-		Status:          DeviceUnknown,
+		// 电站列表不返回运行状态
+		Status: StationRunning,
 	}
 }
 

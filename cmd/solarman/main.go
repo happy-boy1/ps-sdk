@@ -1,33 +1,44 @@
 // SolarMan（小麦智电 / 小麦商家版）开放平台调用示例。
-// 凭证从环境变量读取，避免把账号密码写进代码：
-//
-//	PS_SOLARMAN_APPID / PS_SOLARMAN_APPSECRET / PS_SOLARMAN_ACCOUNT
-//	PS_SOLARMAN_COUNTRYCODE / PS_SOLARMAN_PASSWORD / PS_SOLARMAN_ORGID
+// 凭据取自 pkg/config/config.toml 的 [platform.solarman] 段，
+// 也可用环境变量临时覆盖（PS_SOLARMAN_PASSWORD / PS_SOLARMAN_ACCOUNT 等）。
 package main
 
 import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"strconv"
 	"time"
 
+	"ps-sdk/pkg/config"
 	"ps-sdk/sdk/solarman"
+	"ps-sdk/service"
 )
 
 func main() {
+	cfg, err := config.Load("")
+	if err != nil {
+		log.Fatal(err)
+	}
+	cred, ok := cfg.Secrets(service.CodeSolarman)
+	if !ok {
+		log.Fatal("config.toml 缺少 [platform.solarman] 配置")
+	}
+
 	sdk, err := solarman.NewSolarmanSDK(
 		solarman.Credentials{
-			AppID:       os.Getenv("PS_SOLARMAN_APPID"),
-			AppSecret:   os.Getenv("PS_SOLARMAN_APPSECRET"),
-			Mobile:      os.Getenv("PS_SOLARMAN_ACCOUNT"),
-			CountryCode: os.Getenv("PS_SOLARMAN_COUNTRYCODE"),
-			Password:    os.Getenv("PS_SOLARMAN_PASSWORD"),
-			OrgID:       parseInt64(os.Getenv("PS_SOLARMAN_ORGID")),
+			AppID:       cred.AppKey,
+			AppSecret:   cred.AppSecret,
+			Email:       cred.Email,
+			Mobile:      cred.Mobile,
+			UserName:    cred.UserName,
+			CountryCode: cred.CountryCode,
+			Password:    cred.Password,
+			OrgID:       cred.OrgID,
+			BaseURL:     cred.APIURL,
 		},
 		solarman.WithLanguage(solarman.LangZh),
-		solarman.WithTimeout(30*time.Second),
+		solarman.WithTimeout(cfg.HTTP.Timeout.Duration()),
 		solarman.WithDebugf(log.Printf),
 	)
 	if err != nil {
@@ -184,15 +195,6 @@ func stationID(id solarman.Str) solarman.Int64 {
 		log.Fatalf("电站 ID %q 无法解析为数值: %v", id.String(), err)
 	}
 	return solarman.Int64(v)
-}
-
-// parseInt64 宽松解析整数，空值或非法值返回 0
-func parseInt64(s string) int64 {
-	v, err := strconv.ParseInt(s, 10, 64)
-	if err != nil {
-		return 0
-	}
-	return v
 }
 
 func fatal(err error) {

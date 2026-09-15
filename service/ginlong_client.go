@@ -11,6 +11,7 @@ import (
 // ginlongAdapter 锦浪云（SolisCloud）适配器。
 // 平台没有统一的设备列表接口，按设备族逐个拉取后合并。
 type ginlongAdapter struct {
+	limitBackoff
 	sdk *ginlong.SolisSDK
 }
 
@@ -50,8 +51,13 @@ func (a *ginlongAdapter) Platform() Platform {
 func (a *ginlongAdapter) ListPowerStations() ([]model.PowerStation, error) {
 	stations := make([]model.PowerStation, 0, stationPageSize)
 	for pageNo := 1; ; pageNo++ {
-		res, err := a.sdk.UserStationList(ginlong.UserStationListRequest{
-			PageRequest: ginlong.PageRequest{PageNo: pageNo, PageSize: stationPageSize},
+		var res *ginlong.UserStationListResult
+		err := a.throttle(isRateLimitError, func() error {
+			result, err := a.sdk.UserStationList(ginlong.UserStationListRequest{
+				PageRequest: ginlong.PageRequest{PageNo: pageNo, PageSize: stationPageSize},
+			})
+			res = result
+			return err
 		})
 		if err != nil {
 			return nil, wrapErr(PlatformGinlong, CodeGinlong, "列出电站", err)
@@ -146,7 +152,12 @@ func (a *ginlongAdapter) ListPowerDevices(stationID uint64) ([]model.PowerDevice
 	devices := make([]model.PowerDevice, 0, devicePageSize)
 	warnings := make([]error, 0, len(families))
 	for _, family := range families {
-		items, err := family.fetch()
+		var items []model.PowerDevice
+		err := a.throttle(isRateLimitError, func() error {
+			result, err := family.fetch()
+			items = result
+			return err
+		})
 		if err != nil {
 			// 常见于接口未开通权限（R0000），记录后继续拉取其余设备族
 			warnings = append(warnings, wrapErr(PlatformGinlong, CodeGinlong, "列出"+family.name, err))

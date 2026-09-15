@@ -3,8 +3,8 @@ package service
 import (
 	"errors"
 	"fmt"
-	"log"
 	"strings"
+	"sync"
 
 	"gorm.io/gorm"
 
@@ -15,9 +15,11 @@ import (
 // 同一平台只应创建一个，适配器内部维护 Token，重复创建会触发多余登录。
 type Client struct {
 	adapter Adapter
+	opts    Options
 }
 
-// Open 按平台短码创建客户端，凭据优先取环境变量，其次取 platform_auth 表
+// Open 按平台短码创建客户端。
+// 凭据来源优先级由低到高：config.toml → platform_auth 表 → 环境变量。
 func Open(code string, opts Options) (*Client, error) {
 	platform, ok := PlatformByCode(code)
 	if !ok {
@@ -32,7 +34,7 @@ func Open(code string, opts Options) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewClient(adapter), nil
+	return NewClient(adapter, opts), nil
 }
 
 // OpenWith 使用调用方提供的凭据创建客户端，不查库
@@ -46,16 +48,19 @@ func OpenWith(cred Credential, opts Options) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewClient(adapter), nil
+	return NewClient(adapter, opts), nil
 }
 
 // NewClient 用现成的适配器创建客户端，便于测试与自定义实现
-func NewClient(adapter Adapter) *Client {
-	return &Client{adapter: adapter}
+func NewClient(adapter Adapter, opts Options) *Client {
+	return &Client{adapter: adapter, opts: opts.WithDefaults()}
 }
 
 // Adapter 返回底层适配器
 func (c *Client) Adapter() Adapter { return c.adapter }
+
+// Options 返回客户端使用的运行参数
+func (c *Client) Options() Options { return c.opts }
 
 // Platform 返回平台元信息
 func (c *Client) Platform() Platform {
@@ -84,58 +89,125 @@ func (c *Client) Sync() (*SyncResult, error) {
 	}
 	result.Stations = len(stations)
 
+	saved, err := c.saveStations(stations, result)
+	if err != nil {
+		return result, err
+	}
+	c.syncDevices(saved, result)
+
+	Logf("[%s] 同步完成：电站 %d/%d，设备 %d/%d，失败 %d 项，告警 %d 项",
+		platform.Code, result.SavedStations, result.Stations,
+		result.SavedDevices, result.Devices, len(result.Errors), len(result.Warnings))
+	return result, nil
+}
+
+// saveStations 逐条落库电站，返回落库后的记录
+func (c *Client) saveStations(stations []model.PowerStation, result *SyncResult) ([]model.PowerStation, error) {
+	saved := make([]model.PowerStation, 0, len(stations))
 	for i := range stations {
-		saved, err := UpsertStation(&stations[i])
+		station, err := UpsertStation(&stations[i])
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("电站 %s(%s) 落库失败: %w",
 				stations[i].StationName, stations[i].StationIDOrigin, err))
 			continue
 		}
+		saved = append(saved, *station)
 		result.SavedStations++
-
-		devices, err := listDevices(c.adapter, saved.StationID, result, stations[i].StationName)
-		if err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("电站 %s 设备拉取失败: %w",
-				stations[i].StationName, err))
-			continue
-		}
-
-		for j := range devices {
-			device := &devices[j]
-			device.StationID = saved.StationID
-			if device.DeviceName == "" {
-				device.DeviceName = device.DeviceSN
-			}
-			if err := UpsertDevice(device); err != nil {
-				result.Errors = append(result.Errors, fmt.Errorf("设备 %s 落库失败: %w",
-					device.DeviceIDOrigin, err))
-				continue
-			}
-			result.SavedDevices++
-		}
-		result.Devices += len(devices)
-		result.DeviceCounts[saved.StationID] = len(devices)
 	}
-
-	Logf("[%s] 同步完成：电站 %d/%d，设备 %d/%d，失败 %d 项",
-		platform.Code, result.SavedStations, result.Stations,
-		result.SavedDevices, result.Devices, len(result.Errors))
-	return result, nil
+	return saved, nil
 }
 
-// listDevices 拉取设备列表，把「部分设备族不可用」降级为告警并返回已拿到的设备
-func listDevices(adapter Adapter, stationID uint64, result *SyncResult, stationName string) ([]model.PowerDevice, error) {
-	devices, err := adapter.ListPowerDevices(stationID)
-	if err == nil {
-		return devices, nil
+// syncDevices 拉取并落库各电站的设备。
+// Concurrency > 1 时并发拉取（网络在平台侧耗时），落库仍串行执行。
+func (c *Client) syncDevices(stations []model.PowerStation, result *SyncResult) {
+	if len(stations) == 0 {
+		return
 	}
 
-	var partial *PartialError
-	if errors.As(err, &partial) {
-		result.Warnings = append(result.Warnings, fmt.Errorf("电站 %s: %w", stationName, partial))
-		return partial.Devices, nil
+	type pulled struct {
+		devices    []model.PowerDevice
+		warnings   []error
+		fetchError error
+		station    model.PowerStation
 	}
-	return nil, err
+
+	results := make([]pulled, len(stations))
+	workers := c.opts.Concurrency
+	if workers < 1 {
+		workers = 1
+	}
+
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	for i := range stations {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(index int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			item := pulled{station: stations[index]}
+			devices, err := c.adapter.ListPowerDevices(stations[index].StationID)
+			switch {
+			case err == nil:
+				item.devices = devices
+			default:
+				var partial *PartialError
+				if errors.As(err, &partial) {
+					item.devices = partial.Devices
+					item.warnings = partial.Warnings
+				} else {
+					item.fetchError = err
+				}
+			}
+			results[index] = item
+		}(i)
+	}
+	wg.Wait()
+
+	for _, item := range results {
+		name := item.station.StationName
+		for _, warning := range item.warnings {
+			result.Warnings = append(result.Warnings, fmt.Errorf("电站 %s: %w", name, warning))
+		}
+		if item.fetchError != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("电站 %s 设备拉取失败: %w", name, item.fetchError))
+			continue
+		}
+		c.saveDevices(item.station.StationID, item.devices, result)
+	}
+}
+
+// saveDevices 落库单站设备，同一原始 ID 只保留最后一条，与库内 UPSERT 语义一致
+func (c *Client) saveDevices(stationID uint64, devices []model.PowerDevice, result *SyncResult) {
+	lastIndex := make(map[string]int, len(devices))
+	for i := range devices {
+		key := devices[i].DeviceIDOrigin
+		if prev, ok := lastIndex[key]; ok {
+			devices[prev].DeviceIDOrigin = ""
+		}
+		lastIndex[key] = i
+	}
+
+	saved := 0
+	for i := range devices {
+		device := &devices[i]
+		if device.DeviceIDOrigin == "" {
+			continue
+		}
+		device.StationID = stationID
+		if device.DeviceName == "" {
+			device.DeviceName = device.DeviceSN
+		}
+		if err := UpsertDevice(device); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("设备 %s 落库失败: %w", device.DeviceIDOrigin, err))
+			continue
+		}
+		saved++
+		result.SavedDevices++
+	}
+	result.Devices += saved
+	result.DeviceCounts[stationID] = saved
 }
 
 // Stations 读取本平台已落库的电站
@@ -191,14 +263,10 @@ func (c *Client) SyncDevices(stationID uint64) ([]model.PowerDevice, error) {
 		return nil, err
 	}
 
-	for i := range devices {
-		devices[i].StationID = stationID
-		if devices[i].DeviceName == "" {
-			devices[i].DeviceName = devices[i].DeviceSN
-		}
-		if err := UpsertDevice(&devices[i]); err != nil {
-			return nil, fmt.Errorf("设备 %s 落库失败: %w", devices[i].DeviceIDOrigin, err)
-		}
+	result := newSyncResult(c.Platform())
+	c.saveDevices(stationID, devices, result)
+	if len(result.Errors) > 0 {
+		return devices, errors.Join(result.Errors...)
 	}
 	return devices, nil
 }
@@ -212,7 +280,7 @@ func SyncAll(opts Options) ([]*SyncResult, error) {
 		client, err := Open(platform.Code, opts)
 		if err != nil {
 			if errors.Is(err, ErrCredentialMissing) || errors.Is(err, ErrDatabaseNotReady) {
-				log.Printf("[%s] 跳过：%v", platform.Code, err)
+				Logf("[%s] 跳过：%v", platform.Code, err)
 				continue
 			}
 			errs = append(errs, fmt.Errorf("[%s] 打开失败: %w", platform.Code, err))

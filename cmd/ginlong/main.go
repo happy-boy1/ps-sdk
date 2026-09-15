@@ -1,25 +1,35 @@
 // 锦浪云平台 API 调用示例。
-// 凭证从环境变量读取：PS_GINLONG_APPID（KeyID）与 PS_GINLONG_APPSECRET（KeySecret），
-// 可在锦浪云 WEB 端「服务 - API 管理」获取。
+// 凭据取自 pkg/config/config.toml 的 [platform.ginlong] 段（app_id/app_secret 由数据库提供，
+// 也可用 PS_GINLONG_APPID / PS_GINLONG_APPSECRET 环境变量临时覆盖）。
 package main
 
 import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
 	"time"
 
+	"ps-sdk/pkg/config"
 	"ps-sdk/sdk/ginlong"
 )
 
 func main() {
+	cfg, err := config.Load("")
+	if err != nil {
+		log.Fatal(err)
+	}
+	cred, ok := cfg.Credential("ginlong")
+	if !ok {
+		log.Fatal("config.toml 缺少 [platform.ginlong] 配置")
+	}
+
 	sdk, err := ginlong.NewSolisSDK(
 		ginlong.Credentials{
-			APIID:     os.Getenv("PS_GINLONG_APPID"),
-			APISecret: os.Getenv("PS_GINLONG_APPSECRET"),
+			APIID:     cred.AppID,
+			APISecret: cred.AppSecret,
+			BaseURL:   cred.APIURL,
 		},
-		ginlong.WithTimeout(30*time.Second),
+		ginlong.WithTimeout(cfg.HTTP.Timeout.Duration()),
 		ginlong.WithDebugf(log.Printf),
 	)
 	if err != nil {
