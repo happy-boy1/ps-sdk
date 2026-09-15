@@ -212,7 +212,7 @@ func (sdk *SolarmanSDK) StationHistory(req StationHistoryRequest) (*StationHisto
 // StationListItem 账号下电站项
 type StationListItem struct {
 	rawHolder
-	ID                      Int64                   `json:"id"`                      // 电站ID
+	ID                      Str                     `json:"id"`                      // 电站ID
 	Name                    string                  `json:"name"`                    // 电站名称
 	LocationLat             Num                     `json:"locationLat"`             // 纬度
 	LocationLng             Num                     `json:"locationLng"`             // 经度
